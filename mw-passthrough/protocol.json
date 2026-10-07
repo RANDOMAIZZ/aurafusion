@@ -1,0 +1,14 @@
+{
+  "link": "ws://127.0.0.1:25599",
+  "note": "1 GTA metre = 1 block. NFS (x,y,z) -> MC (x, z+yOffset, -y). yaw_mc = 180 - heading_nfs, pitch_mc = -pitch_nfs",
+  "messages_to_mc": {
+    "cam": {"t": "cam", "pos": [123.4, 56.7, 89.0], "yaw": 90.0, "pitch": 0.0, "fov": 70.0},
+    "ground": {"t": "ground", "cols": [{"x": 0, "z": 0, "y": 64}], "yOffset": 64},
+    "ping": {"t": "ping", "id": 1}
+  },
+  "messages_from_mc": {
+    "explosion": {"t": "explosion", "pos": [0, 64, 0], "power": 4.0},
+    "block": {"t": "block", "pos": [0, 64, 0], "place": true},
+    "pong": {"t": "pong", "id": 1}
+  }
+}

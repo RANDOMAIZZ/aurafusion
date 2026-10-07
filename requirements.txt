@@ -1,0 +1,5 @@
+PySide6>=6.6
+numpy>=1.26
+pyaudiowpatch>=0.2.12
+openrgb-python>=0.3.5
+Pillow>=10

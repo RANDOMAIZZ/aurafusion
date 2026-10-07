@@ -1,0 +1,1 @@
+{"schemaVersion":1,"id":"mw-passthrough","version":"0.1.0","name":"MW Passthrough","description":"NFS MW camera+ground link (slice 1)","authors":["you"],"license":"MIT","environment":"client","entrypoints":{"client":["dev.mw.passthrough.MwPassthroughClient"]},"mixins":["mw-passthrough.client.mixins.json"],"depends":{"fabricloader":">=0.16.0","minecraft":"~1.21.1"}}
