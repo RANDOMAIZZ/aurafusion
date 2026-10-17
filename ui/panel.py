@@ -337,10 +337,11 @@ class Panel(QWidget):
         w = QWidget()
         v = QVBoxLayout(w)
         v.setContentsMargins(4, 4, 4, 4)
-        g = QGroupBox("Устройства OpenRGB")
+        g = QGroupBox("Устройства подсветки (OpenRGB + BLE)")
         gv = QVBoxLayout()
         self.dev_list = QListWidget()
         self.dev_list.setMaximumHeight(110)
+        self.dev_list.setToolTip("● включено   ○ выключено")
         gv.addWidget(self.dev_list)
         hr = QHBoxLayout()
         self.btn_dev_refresh = QPushButton("↻ Найти устройства")
@@ -831,8 +832,10 @@ class Panel(QWidget):
     def set_devices(self, devices, cfg_devices):
         self.dev_list.clear()
         for name in devices:
-            en = cfg_devices.get(name, {}).get("enabled", True)
-            it = QListWidgetItem(("● " if en else "○ ") + name)
+            d = cfg_devices.get(name, {}) if isinstance(cfg_devices, dict) else {}
+            en = d.get("enabled", True)
+            tag = "  [BLE]" if d.get("transport") == "ble" else ""
+            it = QListWidgetItem(("● " if en else "○ ") + name + tag)
             self.dev_list.addItem(it)
 
     def refresh_live(self):

@@ -76,7 +76,12 @@ DEFAULTS = {
     "min_brightness": 0.02, "max_brightness": 1.0,
     "startup_delay_s": 20, "idle_fps": 5, "send_threshold": 0.004, "reassert_min": 0,
     "mode_kick": True,  # авто-кик режима GPU при старте (лечит залипший Direct)
+    # --- BLE-лента (ELK-BLEDOM/BLEDDM) как обычное устройство подсветки ---
+    "ble_enabled": True,    # сканировать BLE-ленты рядом
+    "ble_scan_s": 8,        # длительность BLE-сканирования при поиске устройств
+    "ble_max_fps": 20,      # потолок частоты BLE-кадров (клоны рвут GATT на 60 fps)
     # --- система ---
+    "web_theme": "neon",          # тема web-интерфейса, 20 шт. (список — THEMES в webui/app.js)
     "autostart": False, "autosave": True,
     "openrgb_host": "127.0.0.1", "openrgb_port": 6742,
 }

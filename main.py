@@ -14,9 +14,11 @@ from PySide6.QtGui import QColor, QIcon, QPixmap, QAction
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
 from core import config as C
+from core import ble_strip
 from core.audio_engine import SharedAudio
 from core.screen_color import ScreenColor
-from core.rgb_engine import RGBEngine, hex_to_rgb, scale_color, kick_device_mode, is_gpu_like
+from core.rgb_engine import (RGBEngine, hex_to_rgb, scale_color, kick_device_mode,
+                             is_gpu_like, is_ble_target)
 from core import openrgb_raw
 from ui.overlay import Overlay
 from ui.panel import Panel
@@ -239,12 +241,20 @@ class App:
         for name, d in devs.items():
             if not d.get("enabled", True):
                 continue
+            color_hex = shared or d.get("color_hex", self.cfg.get("static_color", "#C50DF1"))
+            if d.get("transport") == "ble":
+                # BLE-лента: свой транспорт, но тот же конвейер цвета/яркости
+                out.append({"device_name": name, "transport": "ble",
+                            "addr": d.get("addr", ""),
+                            "zone_name": d.get("zone_name", "STRIP"),
+                            "leds": int(d.get("leds", 1)), "color_hex": color_hex})
+                continue
             if self.devices and name not in self.devices:
                 continue
             out.append({"device_name": name,
                         "zone_name": d.get("zone_name", "ARGB_V2_2"),
                         "leds": int(d.get("leds", 60)),
-                        "color_hex": shared or d.get("color_hex", self.cfg.get("static_color", "#C50DF1"))})
+                        "color_hex": color_hex})
         return out
 
     def start_rgb(self, delay=0.0):
@@ -255,7 +265,8 @@ class App:
             pass
         self.state["running_rgb"] = True
         self.rgb_engine = RGBEngine(lambda: self.cfg, self.audio, self.sc,
-                                    self.state, self._targets, initial_delay=delay)
+                                    self.state, self._targets, initial_delay=delay,
+                                    log=log.info)
         self.rgb_engine.start()
 
     def stop_rgb(self):
@@ -267,10 +278,10 @@ class App:
         self.state["running_rgb"] = False
 
     def kick_mode(self):
-        """Ручной кик режима (кнопка 'Дёрнуть режим'): GPU, иначе все цели."""
+        """Ручной кик режима (кнопка 'Дёрнуть режим'): GPU, иначе все OpenRGB-цели."""
         def work():
             cfg = self.cfg
-            tgts = self._targets()
+            tgts = [t for t in self._targets() if not is_ble_target(t)]
             names = [t["device_name"] for t in tgts if is_gpu_like(t["device_name"])]
             if not names:
                 names = [t["device_name"] for t in tgts]
@@ -288,6 +299,24 @@ class App:
         cfg = dict(self.cfg)
         def work():
             try:
+                tgts = self._targets()
+                # BLE-ленты красим напрямую — им OpenRGB не нужен
+                ble = [t for t in tgts if is_ble_target(t)]
+                orgb = [t for t in tgts if not is_ble_target(t)]
+                col = scale_color(hex_to_rgb(tgts[0]["color_hex"]), 1.0) if tgts else (197, 13, 241)
+                for t in ble:
+                    try:
+                        s = ble_strip.get_strip(t["addr"], max_fps=8, log=log.info)
+                        s.set_hardware_brightness(1.0)
+                        s.paint(col)
+                        log.info("test_color: BLE %s -> %s", t["addr"], col)
+                    except Exception as e:
+                        log.warning("test_color BLE %s: %s", t.get("addr"), e)
+                        self.state["error"] = f"BLE: {e}"
+                if not orgb:
+                    self.state["status"] = "тест: 4с"
+                    time.sleep(4)
+                    return
                 conn = openrgb_raw.OpenRGBRaw(cfg.get("openrgb_host", "127.0.0.1"),
                                               int(cfg.get("openrgb_port", 6742)))
                 try:
@@ -301,13 +330,9 @@ class App:
                             c.disconnect()
                         except Exception:
                             pass
-                    tgts = self._targets() or [{
-                        "device_name": next(iter(devs)) if devs else "",
-                        "zone_name": "ARGB_V2_2", "leds": 60,
-                        "color_hex": cfg.get("static_color", "#C50DF1")}]
-                    import time as _t
-                    col = scale_color(hex_to_rgb(tgts[0]["color_hex"]), 1.0)
-                    for t in tgts:
+                    if not devs:
+                        devs = {}
+                    for t in orgb:
                         d = devs.get(t["device_name"])
                         if d is None:
                             continue
@@ -316,7 +341,7 @@ class App:
                             continue
                         conn.update_zone_leds(d.device_id, z.id, [col] * int(t["leds"]))
                     self.state["status"] = "тест: 4с"
-                    _t.sleep(4)
+                    time.sleep(4)
                 finally:
                     try:
                         conn.close()
@@ -349,36 +374,53 @@ class App:
     def refresh_devices_async(self):
         def work():
             devs = {}
-            if not openrgb_raw.wait_for_server(self.cfg.get("openrgb_host", "127.0.0.1"),
-                                               int(self.cfg.get("openrgb_port", 6742)),
-                                               timeout=30.0, step=2.0):
-                return
-            for _ in range(5):
-                try:
-                    import openrgb
-                    c = openrgb.OpenRGBClient(address=self.cfg.get("openrgb_host", "127.0.0.1"),
-                                              port=int(self.cfg.get("openrgb_port", 6742)))
+            # 1) BLE-ленты: не требуют OpenRGB, сканируем всегда
+            ble = {}
+            try:
+                if self.cfg.get("ble_enabled", True):
+                    ble = ble_strip.scan(timeout=float(self.cfg.get("ble_scan_s", 8)))
+                    for addr, nm in ble.items():
+                        devs[nm] = [("STRIP", 1)]
+                        log.info("BLE strip found: %s %s", nm, addr)
+            except Exception as e:
+                log.warning("BLE scan failed: %s", e)
+            # 2) устройства OpenRGB
+            if openrgb_raw.wait_for_server(self.cfg.get("openrgb_host", "127.0.0.1"),
+                                           int(self.cfg.get("openrgb_port", 6742)),
+                                           timeout=30.0, step=2.0):
+                for _ in range(5):
                     try:
-                        for d in c.devices:
-                            devs[d.name] = [(z.name, len(z.leds)) for z in d.zones]
-                        break
-                    finally:
+                        import openrgb
+                        c = openrgb.OpenRGBClient(address=self.cfg.get("openrgb_host", "127.0.0.1"),
+                                                  port=int(self.cfg.get("openrgb_port", 6742)))
                         try:
-                            c.disconnect()
-                        except Exception:
-                            pass
-                except Exception:
-                    time.sleep(2)
+                            for d in c.devices:
+                                devs[d.name] = [(z.name, len(z.leds)) for z in d.zones]
+                            break
+                        finally:
+                            try:
+                                c.disconnect()
+                            except Exception:
+                                pass
+                    except Exception:
+                        time.sleep(2)
             self.devices = devs
             # новые устройства — добавить в конфиг
             changed = False
+            cfg_devs = self.cfg.setdefault("devices", {})
             for name, zones in devs.items():
-                if name not in self.cfg.get("devices", {}):
+                if name not in cfg_devs:
                     z0 = zones[0][0] if zones else "ARGB_V2_2"
                     n0 = zones[0][1] if zones and zones[0][1] > 0 else 60
-                    self.cfg.setdefault("devices", {})[name] = {
+                    cfg_devs[name] = {
                         "zone_name": z0, "leds": n0, "enabled": True,
                         "color_hex": self.cfg.get("static_color", "#C50DF1")}
+                    changed = True
+            # BLE-устройства: дописываем адрес, чтобы движок знал куда писать
+            for nm, addr in ble.items():
+                d = cfg_devs.get(nm)
+                if isinstance(d, dict) and d.get("transport") == "ble" and not d.get("addr"):
+                    d["addr"] = addr
                     changed = True
             if changed:
                 C.save(self.cfg)
@@ -386,6 +428,8 @@ class App:
                 self.panel.set_devices(devs, self.cfg.get("devices", {}))
             except Exception:
                 pass
+            if ble:
+                self.state["status"] = f"найдено BLE-лент: {len(ble)}"
         threading.Thread(target=work, daemon=True).start()
 
     def refresh_audio_async(self):
@@ -443,6 +487,10 @@ class App:
             pass
         try:
             self.stop_rgb()
+        except Exception:
+            pass
+        try:
+            ble_strip.close_all()
         except Exception:
             pass
         QApplication.quit()

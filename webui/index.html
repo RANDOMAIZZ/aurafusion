@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AuraFusion — музыка + экран + ПК</title>
+<link rel="stylesheet" href="/static/style.css">
+<script>
+// тему применяем до первой отрисовки, иначе мигнёт старым цветом
+try{document.documentElement.dataset.theme=localStorage.getItem('aura_theme')||'neon';}catch(e){}
+</script>
+</head>
+<body>
+  <aside id="side">
+    <div class="brand">
+      <div class="mark">◉</div>
+      <div>
+        <div class="nm">AuraFusion</div>
+        <div class="sb">музыка • экран • ПК</div>
+      </div>
+    </div>
+
+    <nav id="nav">
+      <div class="navcap">Визуал и экран</div>
+      <button class="navbtn" data-page="viz"><span class="ic">✨</span><span>Визуал</span></button>
+      <button class="navbtn" data-page="amb"><span class="ic">🖥</span><span>Экран → ПК</span></button>
+      <div class="navcap">ПК и система</div>
+      <button class="navbtn" data-page="rgb"><span class="ic">💡</span><span>Подсветка ПК</span></button>
+      <button class="navbtn" data-page="snd"><span class="ic">🔊</span><span>Звук</span></button>
+      <button class="navbtn" data-page="sys"><span class="ic">⚙</span><span>Система</span></button>
+    </nav>
+
+    <div id="sidefoot">
+      <div id="footbar"><i></i></div>
+      <div id="sidestatus">старт...</div>
+    </div>
+  </aside>
+
+  <main id="right">
+    <header id="head">
+      <div class="swatch2">
+        <div class="ring" id="ringScreen"></div>
+        <div class="kv"><div class="cap">Экран →</div><div class="val" id="hexScreen">#000000</div></div>
+      </div>
+      <div class="divider"></div>
+      <div class="swatch2">
+        <div class="ring" id="ringPc"></div>
+        <div class="kv"><div class="cap">ПК 💡</div><div class="val" id="hexPc">#000000</div></div>
+      </div>
+      <div class="divider"></div>
+      <div class="mid">
+        <div class="mrow">
+          <span class="cap">Уровень звука</span>
+          <div class="meter"><i id="meter"></i></div>
+        </div>
+        <div id="status">...</div>
+      </div>
+      <div class="hbtns">
+        <button class="btn pri" id="btnRgb">▶ RGB СТАРТ</button>
+        <button class="btn" id="btnHide">Скрыть оверлей</button>
+      </div>
+    </header>
+    <div id="pages"></div>
+  </main>
+
+  <div class="toast" id="toast"></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

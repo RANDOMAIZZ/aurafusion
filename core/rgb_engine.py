@@ -167,7 +167,9 @@ def is_gpu_like(name):
 def kick_device_mode(host, port, device_name):
     """Дёрнуть режим устройства: другой -> Direct.
     Лечит залипание, когда OpenRGB показывает Direct, но пакеты цвета
-    игнорируются (ручной трюк 'выбрать другое и вернуть Direct')."""
+    игнорируются (ручной трюк 'выбрать другое и вернуть Direct').
+    Не падает, если конкретный режим устройство не принимает — важно,
+    чтобы в итоге встал Direct, а не чтобы панель сыпала ошибками."""
     import openrgb
     c = openrgb.OpenRGBClient(address=host, port=port)
     try:
@@ -181,7 +183,10 @@ def kick_device_mode(host, port, device_name):
             except Exception:
                 pass
             time.sleep(0.2)
-        d.set_mode("Direct")
+        try:
+            d.set_mode("Direct")
+        except Exception:
+            force_direct(d)
     finally:
         try:
             c.disconnect()
@@ -214,8 +219,50 @@ def resolve_zone(cfg_target, conn):
             pass
 
 
+def is_ble_target(t):
+    """BLE-лента вместо OpenRGB-устройства (transport='ble' в конфиге)."""
+    return str(t.get("transport", "")).lower() == "ble"
+
+
+class OrgbSink:
+    """Приёмник цвета для устройства под управлением OpenRGB."""
+
+    def __init__(self, engine, t, dev_id, zone, n):
+        self.engine = engine
+        self.dev_id = dev_id
+        self.zone = zone
+        self.n = n
+
+    def paint(self, rgb):
+        # conn читается у движка в момент отправки — после переподключения
+        # сокет свежий, а замыкание на старый был бы источник «мёртвых» целей
+        self.engine.conn.update_zone_leds(self.dev_id, self.zone, [rgb] * self.n)
+
+    def close(self):
+        pass
+
+
+class BleSink:
+    """Приёмник цвета для BLE-ленты: та же логика цвета/яркости, свой транспорт."""
+
+    def __init__(self, addr, max_fps=20, log=None):
+        from . import ble_strip
+        self.strip = ble_strip.get_strip(addr, max_fps=max_fps, log=log)
+        self.addr = addr
+
+    def paint(self, rgb, brightness=None):
+        # brightness игнорируется: как и у зон OpenRGB, яркость уже вшита
+        # в цвет движком (apply_led_floor(scale_color(base, prev))). Отдельный
+        # кадр яркости на клоне стоит ~130 мс и убивает частоту обновления.
+        self.strip.paint(rgb)
+
+    def close(self):
+        pass
+
+
 class RGBEngine(threading.Thread):
-    def __init__(self, cfg_getter, audio, screencolor, state, targets_fn, initial_delay=0.0):
+    def __init__(self, cfg_getter, audio, screencolor, state, targets_fn,
+                 initial_delay=0.0, log=None):
         super().__init__(daemon=True)
         self._cfg = cfg_getter
         self.audio = audio
@@ -223,10 +270,21 @@ class RGBEngine(threading.Thread):
         self.state = state
         self._targets_fn = targets_fn
         self._initial_delay = max(0.0, float(initial_delay or 0.0))
+        self.log = log or (lambda *a: None)
         self.stop_flag = threading.Event()
         self.conn = None
         self._targets = None
         self._sig = None
+
+    def _make_ble_sink(self, t, cfg):
+        try:
+            fps = float(cfg.get("ble_max_fps", 20))
+        except Exception:
+            fps = 20.0
+        sink = BleSink(t.get("addr", ""), max_fps=fps, log=self.log)
+        if sink.strip is None:
+            raise RuntimeError("BLE-адрес не задан")
+        return sink
 
     def _current_base(self, t, cfg):
         mode = cfg.get("rgb_mode", "mix")
@@ -270,7 +328,12 @@ class RGBEngine(threading.Thread):
                     self.stop_flag.wait(0.5)
                     continue
                 host, port = cfg.get("openrgb_host", "127.0.0.1"), int(cfg.get("openrgb_port", 6742))
-                if self.conn is None:
+                dt = 1.0 / max(1, int(cfg.get("rgb_fps", 30)))
+                live = list(self._targets_fn())
+                need_orgb = any(not is_ble_target(t) for t in live)
+                # OpenRGB нужен только если есть хоть одно его устройство:
+                # BLE-лента обязана работать и когда сервер OpenRGB не поднят
+                if need_orgb and self.conn is None:
                     try:
                         self.conn = openrgb_raw.OpenRGBRaw(host, port)
                         state["error"] = None
@@ -281,8 +344,6 @@ class RGBEngine(threading.Thread):
                         state["status"] = f"ожидание OpenRGB ({e})..."
                         self.stop_flag.wait(min(3.0 + conn_fails, 10.0))
                         continue
-                dt = 1.0 / max(1, int(cfg.get("rgb_fps", 30)))
-                live = list(self._targets_fn())
                 sig = tuple(sorted((t["device_name"], str(t["zone_name"]), int(t["leds"])) for t in live))
                 if sig != self._sig:
                     self._sig = sig
@@ -291,19 +352,28 @@ class RGBEngine(threading.Thread):
                     if not state.get("error"):
                         state["status"] = f"RGB работает | {names}"
                 if self._targets is None:
-                    resolved = []
-                    try:
-                        for t in live:
-                            tt = dict(t)
-                            tt["_host"], tt["_port"] = host, port
-                            dev_id, zone, n = resolve_zone(tt, self.conn)
-                            resolved.append((t, (dev_id, zone, n)))
-                        self._targets = resolved
-                    except Exception as e:
-                        state["error"] = str(e)
-                        state["status"] = f"{names} | недоступно: {e}"
+                    resolved, bad = [], []
+                    for t in live:
+                        try:
+                            if is_ble_target(t):
+                                resolved.append((t, self._make_ble_sink(t, cfg)))
+                            else:
+                                tt = dict(t)
+                                tt["_host"], tt["_port"] = host, port
+                                dev_id, zone, n = resolve_zone(tt, self.conn)
+                                resolved.append((t, OrgbSink(self, t, dev_id, zone, n)))
+                        except Exception as e:
+                            bad.append(f"{t['device_name'][:18]}: {e}")
+                    if not resolved and bad:
+                        state["error"] = "; ".join(bad)[:200]
+                        state["status"] = f"{names} | недоступно: {bad[0][:70]}"
                         self.stop_flag.wait(2.0)
                         continue
+                    if bad:
+                        self.log("rgb: часть устройств недоступна: %s", "; ".join(bad))
+                        state["status"] = f"RGB работает | {names}"
+                        state["error"] = "; ".join(bad)[:200]
+                    self._targets = resolved
                 ts = self._targets
                 # авто-кик GPU: дёрнуть режим туда-обратно один раз,
                 # иначе GALAX-подобные висят в 'Direct', но цвет не берут
@@ -354,12 +424,20 @@ class RGBEngine(threading.Thread):
                 paint_color = cols[0] if cols else (197, 13, 241)
                 if changed or heartbeat_due:
                     try:
-                        for i, (t, (dev_id, zone, n)) in enumerate(ts):
+                        for i, (t, sink) in enumerate(ts):
                             final = apply_led_floor(scale_color(cols[i], prev), cfg)
-                            self.conn.update_zone_leds(dev_id, zone, [final] * n)
+                            sink.paint(final)
                         last_sig = (prev, tuple(cols))
                         last_send_t = now_m
-                    except Exception:
+                    except Exception as e:
+                        if any(is_ble_target(t) for t, _ in ts) and not need_orgb:
+                            self.log("rgb: сбой BLE-цели: %s", e)
+                            state["status"] = "BLE-лента: переподключение..."
+                            self._targets = None
+                            self._sig = None
+                            last_sig = None
+                            self.stop_flag.wait(1.0)
+                            continue
                         try:
                             self.conn.close()
                         except Exception:
@@ -390,6 +468,12 @@ class RGBEngine(threading.Thread):
                     self.conn.close()
             except Exception:
                 pass
+            for _t, sink in (self._targets or []):
+                try:
+                    sink.close()
+                except Exception:
+                    pass
+            self._targets = None
             self.stop_flag.set()
             state["running_rgb"] = False
             state["status"] = "RGB остановлено"

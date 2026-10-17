@@ -47,6 +47,7 @@ class SharedAudio(threading.Thread):
         self.bass = 0.0    # бас 20..250 RMS*boost
         self.has_signal = False
         self.status = "init"
+        self.active = ""      # фактически открытый loopback (может отличаться от настроенного)
         self.n_bars = n_bars
         self._bin_idx = self._make_bins(n_bars)
         self._win_cache = {}
@@ -243,6 +244,7 @@ class SharedAudio(threading.Thread):
                         self.block = chunk
                         self._bin_idx = self._make_bins(self.n_bars)
                         self.status = f"loopback: {dev['name']}"
+                        self.active = dev["name"]
                         import logging as _lg2
                         _lg2.getLogger("aurafusion").info(
                             "audio opened: %s sr=%s ch=%s chunk=%s",

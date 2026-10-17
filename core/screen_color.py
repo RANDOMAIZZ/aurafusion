@@ -239,6 +239,57 @@ def juicy_target(arr01, lock=None, hold=2):
     return (int(target[0]), int(target[1]), int(target[2]))
 
 
+GRAD_N = 32  # разрешение горизонтального профиля кадра (столбцов)
+
+
+def horizontal_profile(arr01, n=GRAD_N):
+    """Горизонтальный профиль кадра: n цветов слева направо.
+
+    Тот же принцип, что у juicy_target, но по вертикальным полосам вместо
+    всего кадра: живой пиксель (sat/val) тянет насыщенность×яркостью,
+    центр по вертикали чуть важнее (обычно там кадр, а по краям рамки).
+    Тёмный/ахроматичный кадр даёт нейтральный серый, а не чёрный —
+    иначе градиент проваливается в ноль и подсветка 'вырубается'."""
+    a = np.asarray(arr01, dtype=np.float32)
+    if a.ndim != 3 or a.shape[2] != 3:
+        return np.zeros((max(1, int(n)), 3), dtype=np.float32)
+    h, w = int(a.shape[0]), int(a.shape[1])
+    n = max(1, int(n))
+    # ресемплинг по ширине: нарезка на n равных полос
+    edges = np.linspace(0, w, n + 1).astype(int)
+    yy = np.mgrid[0:h, 0:w][0].astype(np.float32)
+    vweight = (0.55 + 0.45 * np.exp(-(((yy / max(1, h - 1)) - 0.5) ** 2) / 0.4))
+    out = np.zeros((n, 3), dtype=np.float32)
+    for i in range(n):
+        x0, x1 = edges[i], max(edges[i] + 1, edges[i + 1])
+        sl = a[:, x0:x1, :]
+        flat = sl.reshape(-1, 3)
+        mx = flat.max(axis=1)
+        mn = flat.min(axis=1)
+        sat = (mx - mn) / np.maximum(mx, 1e-6)
+        val = np.clip(mx, 0, 1)
+        vw = vweight[:, x0:x1].reshape(-1)
+        live = (sat > 0.20) & (val > 0.16)
+        if int(live.sum()) > 6:
+            wgt = (sat[live] ** 1.3) * val[live] * vw[live]
+            s = float(wgt.sum())
+            if s > 1e-6:
+                out[i] = (flat[live] * wgt[:, None]).sum(axis=0) / s
+                continue
+        # ахроматичный кусок: поднимаем тусклое к V~0.35, оттенок не выдумываем
+        wg = val * vw
+        sw = float(wg.sum())
+        if sw > 1e-6:
+            t = (flat * wg[:, None]).sum(axis=0) / sw
+            m = float(t.max())
+            if 8.0 / 255.0 <= m < 90.0 / 255.0:
+                t = t * (90.0 / 255.0 / m)
+            out[i] = t
+        else:
+            out[i] = 0.06
+    return np.clip(out, 0.0, 1.0)
+
+
 class ScreenColor:
     """Потокобезопасное хранилище цвета. feed_frame() зовётся из GUI-потока 2 раза/сек."""
 
