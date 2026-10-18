@@ -49,6 +49,13 @@ class VirtualClock:
         self.t += self.step
         return v
 
+    def monotonic(self):
+        # Оверлей метит им последний тик, на него смотрит сторож в web_main.
+        # Отдельный метод нужен именно потому, что подменяется весь модуль
+        # time: если бы виртуальные часы не умели monotonic, стенд падал бы
+        # на AttributeError ещё на первом кадре.
+        return self.time()
+
     def sleep(self, _s):
         return None
 

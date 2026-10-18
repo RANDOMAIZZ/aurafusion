@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import queue
+import socket
 import sys
 import threading
 import time
@@ -169,6 +170,7 @@ class GuiBridge(QObject):
         self.call.emit(fn)
 
 from core import config as C
+from core import autostart as autostart_mod
 from core import ble_strip
 from core import openrgb_raw
 from core import scenes
@@ -733,8 +735,10 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     core = None
 
-    def log_message(self, *a):  # тише в консоль
-        pass
+    def log_message(self, fmt, *args):
+        # Раньше здесь был pass: любой разбор запроса, в том числе ошибка,
+        # молча уходил в никуда — под pythonw stderr всё равно не видно.
+        log.debug("%s %s", self.address_string(), fmt % args)
 
     # ---------- утилиты ----------
     def _json(self, obj, code=200):
@@ -774,6 +778,21 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    # Время ожидания на соединение. Без него keep-alive вкладка держит свой
+    # поток часами: handle_one_request() висит в read() до следующего запроса.
+    # Такие потоки копятся, и при обрыве сети или переходе с Wi-Fi на провод
+    # им конца нет: соединение может висеть до бесконечности.
+    timeout = 30
+
+    def handle_one_request(self):
+        try:
+            BaseHTTPRequestHandler.handle_one_request(self)
+        except (TimeoutError, socket.timeout):
+            self.close_connection = True
+        except OSError:
+            # Клиент отвалился посреди ответа. Это его дело, не наша ошибка.
+            self.close_connection = True
+
     def _icon(self, size):
         data = icon_png(size)
         if not data:
@@ -801,6 +820,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/config":
             with core._lock:
                 cfg = dict(core.cfg)
+            # Показываем панели настоящее состояние автозапуска, а не значение
+            # из файла. Разъехаться они могут, если запись в реестре удалили
+            # руками или запись указывала на удалённый файл — галочка стояла
+            # бы «включено», а автозагрузки не было.
+            cfg["autostart"] = autostart_mod.is_enabled()
+            cfg["autostart_info"] = autostart_mod.status()
             return self._json({"config": cfg})
         if path == "/api/state":
             return self._json(core.snapshot(extra_devices=True))
@@ -855,6 +880,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": res is not None, "result": res or {}})
             if path == "/api/action":
                 name = data.get("name") or ""
+                if name == "autostart":
+                    # on лежит внутри args, а не на верхнем уровне тела:
+                    # панель шлёт {name, args:{on}}. Раньше читалось
+                    # data.get("on") — всегда None, то есть всегда «выключить».
+                    return self._json({"ok": True, "result": _autostart(
+                        core, (data.get("args") or {}).get("on"))})
                 fn = ACTIONS.get(name)
                 if fn is None:
                     return self._json({"ok": False, "error": "неизвестное действие"}, 400)
@@ -864,6 +895,35 @@ class Handler(BaseHTTPRequestHandler):
             log.error("action %s failed: %s", path, e)
             return self._json({"ok": False, "error": str(e)}, 500)
         self.send_error(404)
+
+
+def _autostart(core, on):
+    """Включить/выключить автозапуск и записать это в конфиг.
+
+    Галочка в панели шла в конфиг, но ничего не делала: ключ autostart был
+    заведён, а читать его было некому. Плюс в реестре лежала запись на
+    main.py — файл удалён при переходе на веб-версию, и Windows при входе
+    молча пытался запустить то, чего уже нет.
+    """
+    want = bool(on)
+    if want:
+        ok, info = autostart_mod.enable()
+    else:
+        ok, info = autostart_mod.disable()
+    if ok:
+        with core._lock:
+            core.cfg["autostart"] = want
+        try:
+            C.save(core.cfg)
+        except Exception:
+            log.exception("не сохранил конфиг после смены автозапуска")
+        log.info("автозапуск %s: %s", "включён" if want else "выключен", info)
+    else:
+        log.error("автозапуск не переключился: %s", info)
+    st = autostart_mod.status()
+    st["ok"] = ok
+    st["info"] = info
+    return st
 
 
 @action("start_rgb")
@@ -988,6 +1048,57 @@ def _pump(core, app):
     s.start(5000)        # автосохранение: без него настройки терялись бы при выходе
 
 
+def _watchdog(core, app, httpd):
+    """Сторож: поднимает то, что перестало работать, и пишет об этом в лог.
+
+    Проверяет две вещи, обе ломались «молча»:
+
+    - Поток http-сервера. Раньше его падение означало, что панель не отвечает
+      навсегда: сокет слушал, принимать было некому, а значок в трее и оверлей
+      продолжали работать, так что всё выглядело как «зависло».
+    - Тики оверлея. Если оверлей виден, а метка последнего тика не
+      обновлялась дольше нескольких секунд, значит он не рисует. Перезапускаем
+      таймер: дешевле, чем искать, что именно встало.
+    """
+    w = QTimer(app)
+
+    def check():
+        try:
+            if not any(t.name == "aura-web" and t.is_alive() for t in threading.enumerate()):
+                log.error("сторож: поток http-сервера мёртв, поднимаю заново")
+                threading.Thread(target=_run_server, args=(httpd,), daemon=True,
+                                 name="aura-web").start()
+                return
+        except Exception:
+            log.exception("сторож: не смог проверить сервер")
+
+        try:
+            ov = core.overlay
+            if not ov.isVisible():
+                return
+            idle = time.monotonic() - getattr(ov, "_last_tick", 0.0)
+            if idle > 6.0:
+                log.error("сторож: оверлей не тикает %.1f с, перезапускаю таймер", idle)
+                ov.apply_fps()
+        except Exception:
+            log.exception("сторож: не смог проверить оверлей")
+
+    w.timeout.connect(check)
+    w.start(3000)
+    return w
+
+
+def _run_server(httpd):
+    """Сервер с переподъёмом после падения. См. пояснение в main()."""
+    while True:
+        try:
+            httpd.serve_forever(poll_interval=0.4)
+            return              # shutdown() — выходим штатно
+        except Exception:
+            log.exception("http-сервер упал, поднимаю заново через 2 с")
+            time.sleep(2.0)
+
+
 def main():
     args = sys.argv[1:]
     port = 8765
@@ -1012,6 +1123,17 @@ def main():
     core = Core()
     Handler.core = core
 
+    # Автозапуск. Если в конфиге он включён, а в реестре записи нет или она
+    # указывает на удалённый main.py — чиним. Иначе пользователь видит
+    # включённую галочку, а при входе в систему ничего не запускается.
+    if core.cfg.get("autostart"):
+        if not autostart_mod.is_enabled():
+            ok, info = autostart_mod.enable()
+            if ok:
+                log.info("автозапуск починен при старте: %s", info)
+            else:
+                log.error("автозапуск включён в настройках, но не сработал: %s", info)
+
     core.audio.start()
     launch_openrgb(core.cfg.get("openrgb_host", "127.0.0.1"),
                    int(core.cfg.get("openrgb_port", 6742)))
@@ -1035,8 +1157,14 @@ def main():
 
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
-    th = threading.Thread(target=httpd.serve_forever, daemon=True, name="aura-web")
-    th.start()
+    # Поток сервера с переподъёмом после падения. Раньше был голый
+    # serve_forever в демон-потоке: любое исключение из него убивало поток,
+    # сокет оставался слушающим, а принимать было некому — панель не отвечала
+    # навсегда, и выглядело это как «зависло». Исключение уходило в stderr, а
+    # под pythonw stderr никуда не пишется, так что следов не оставалось.
+    threading.Thread(target=_run_server, args=(httpd,), daemon=True,
+                     name="aura-web").start()
+    _watchdog(core, app, httpd)
     url = f"http://{host}:{port}/"
     log.info("web ui: %s", url)
     print(f"[AuraFusion web] {url}  (Ctrl+C — выход)")

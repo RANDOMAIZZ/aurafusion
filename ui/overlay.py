@@ -366,6 +366,7 @@ class Overlay(QWidget):
         self._silence = 0.0
         self._hide_k = 1.0
         self._last_eff_op = -1.0
+        self._last_tick = time.monotonic()
         # сцена Qt для размытия ореола; создаётся лениво при первом кадре
         # со свечением — иначе платили бы за неё даже при свечении 0
         self._gfx = None
@@ -741,6 +742,11 @@ class Overlay(QWidget):
 
     @Slot()
     def tick(self):
+        # Метка последнего тика: на неё смотрит сторож в web_main. По ней видно,
+        # что оверлей перестал обновляться — из-за зависшего звука, зависшего
+        # таймера или потерянного окна. Без неё «зависший» оверлей неотличим
+        # от работающего, пока смотришь на картинку.
+        self._last_tick = time.monotonic()
         S = self._cfg()
         if S.get("bars", 64) != self._last_bars:
             self.disp = np.zeros(S["bars"], dtype=np.float32)

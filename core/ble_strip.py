@@ -63,6 +63,21 @@ class BleStrip:
         self.error = None
         self._log = log or (lambda *a: None)
         self.max_fps = max(1.0, float(max_fps))
+        # последнее написанное в лог и когда. Лента, которую телефон занял или
+        # которая выключена, сыпет одну и ту же ошибку каждые полторы секунды
+        # часами: за вечер лог на 200 КБ, и в нём не видно ничего, кроме этой
+        # мухи. Пишем первый раз, потом не чаще раза в минуту.
+        self._last_log = ""
+        self._last_log_at = 0.0
+
+    def _log_once(self, msg, every=60.0):
+        """Написать в лог, если такого сообщения ещё не было или оно старое."""
+        now = time.monotonic()
+        if msg == self._last_log and now - self._last_log_at < every:
+            return
+        self._last_log = msg
+        self._last_log_at = now
+        self._log(msg)
 
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop_thread,
@@ -170,7 +185,7 @@ class BleStrip:
             except Exception as e:  # noqa: BLE001 — клионы рвут GATT сами
                 self.connected = False
                 self.error = str(e)
-                self._log(f"[ble] {self.addr} сбой: {e}")
+                self._log_once(f"[ble] {self.addr} сбой: {e}")
                 try:
                     self._run(self._teardown(), timeout=3.0)
                 except Exception:

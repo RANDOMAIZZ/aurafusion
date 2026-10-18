@@ -97,7 +97,7 @@ function mkCheck(c) {
     // нативный клик по скрытому input не сработает — переключаем сами
     e.preventDefault();
     i.checked = !i.checked;
-    if (c.onchange) c.onchange(i.checked); else put({ [c.key]: i.checked });
+    if (c.onchange) c.onchange(i.checked, i); else put({ [c.key]: i.checked });
   });
   w.append(l);
   c.el = i;
@@ -238,6 +238,27 @@ function onSat(v) {
   v = Math.max(0, Math.min(1.5, v));
   CFG.rgb_saturation = v; api.set({ rgb_saturation: v });
   sync('sat'); satSync = false;
+}
+
+/* Автозапуск пишется прямо в реестр, а не просто в настройки, поэтому через
+   api.set не идёт: сервер всё равно должен знать, включили его или выключили.
+   Значение, сказанное панелью, игнорируем — доверяем ответу сервера, он
+   видит настоящее состояние записи в Run. Иначе галочка мигнёт «назад»,
+   если что-то пошло не так. */
+async function onAutostart(v, box) {
+  try {
+    const r = await api.act('autostart', { on: !!v });
+    const st = (r && r.result) || {};
+    const onNow = !!st.enabled;
+    CFG.autostart = onNow;
+    if (box) box.checked = onNow;
+    toast(st.ok ? (onNow ? 'Буду запускаться при входе в Windows'
+                           : 'Автозапуск выключен')
+                : 'Не вышло: ' + (st.info || 'ошибка'));
+  } catch (e) {
+    if (box) box.checked = !v;
+    toast('Не вышло: ' + e);
+  }
 }
 
 const REG_PRESETS = {
@@ -743,6 +764,9 @@ const PAGES = {
         ['К центру', 'center'], ['По углам', 'corners']] },
       { t: 'slider', key: 'sys_zoom', label: 'SYS-приближение', min: 0, max: 100, div: 100 },
       { t: 'slider', key: 'sys_shake', label: 'SYS-тряска', min: 0, max: 100, div: 100 },
+    ]},
+    { g: 'Запуск', desc: 'AuraFusion будет запускаться сам при входе в Windows. Браузер при этом не открывается — панель всегда на http://127.0.0.1:8765/, значок появляется в трее.', items: [
+      { t: 'check', key: 'autostart', label: 'Запускать вместе с Windows', onchange: onAutostart },
     ]},
   ],
 
