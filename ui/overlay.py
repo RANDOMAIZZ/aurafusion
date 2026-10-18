@@ -5,7 +5,8 @@ import time
 
 import numpy as np
 from PySide6.QtCore import QRect, QRectF, Qt, QTimer, Slot
-from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (QBrush, QColor, QImage, QLinearGradient, QPainter,
+                          QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import QApplication, QWidget
 
 from core import beat as beat_mod
@@ -239,6 +240,11 @@ def per_style_keys(style):
     """Настройки, которые у каждой фигуры свои — их видно не у всех, и
     значения хранятся отдельно (style_settings[стиль])."""
     keys = {"height_scale", "line_count", "line_smooth"}
+    if style != "sparks":
+        # Ореол вокруг фигуры есть у всех, кроме искр: у них своё свечение
+        # частиц, и два ореола наложились бы вдвое жирнее и вдвое дороже.
+        # Ползунок у искр не показываем — он всё равно ничего бы не делал.
+        keys |= {"shape_glow"}
     if style == "sparks":
         # скорость, разгон и плотность — только у искр, у остальных фигур их нет
         keys |= {"spark_speed", "spark_boost", "spark_density", "spark_glow",
@@ -360,6 +366,9 @@ class Overlay(QWidget):
         self._silence = 0.0
         self._hide_k = 1.0
         self._last_eff_op = -1.0
+        # сцена Qt для размытия ореола; создаётся лениво при первом кадре
+        # со свечением — иначе платили бы за неё даже при свечении 0
+        self._gfx = None
         self._wave = np.zeros(1024, dtype=np.float32)
         self._level = 0.0
         # Детектор темпа. Держим здесь, а не в audio_engine: оверлей — единственное
@@ -466,7 +475,6 @@ class Overlay(QWidget):
         if not cfg.get("follow_screen", True):
             return
         try:
-            from PySide6.QtGui import QImage
             screens = QApplication.screens()
             want = int(cfg.get("color_monitor", -1))
             if 0 <= want < len(screens):
@@ -937,39 +945,16 @@ class Overlay(QWidget):
         style = S.get("style", "smooth")
         # режим цвета фигур считаем один раз на кадр, а не в каждом элементе
         self._cm, self._cc = self._shape_colors(S)
-        if style == "bars":
-            self.draw_bars(p, W, H, n, alpha)
-        elif style == "peak":
-            self.draw_bars(p, W, H, n, alpha, caps=True)
-        elif style == "circle":
-            self.draw_circle(p, W, H, n, alpha)
-        elif style == "combo":
-            self.draw_bars(p, W, H, n, alpha)
-            self.draw_smooth(p, W, H, n)
-        elif style == "fill":
-            self.draw_fill(p, W, H, n)
-        elif style == "ribbon":
-            self.draw_ribbon(p, W, H, n)
-        elif style == "radial":
-            self.draw_radial(p, W, H, n, alpha)
-        elif style == "rays":
-            self.draw_rays(p, W, H, n, alpha)
-        elif style == "particles":
-            self.draw_particles(p, W, H, n, alpha)
-        elif style == "sparks":
-            self.draw_sparks(p, W, H, n, alpha)
-        elif style == "arc":
-            self.draw_arc(p, W, H, n, alpha)
-        elif style == "spiral":
-            self.draw_spiral(p, W, H, n, alpha)
-        elif style == "mesh":
-            self.draw_mesh(p, W, H, n, alpha)
-        elif style == "stack":
-            self.draw_stack(p, W, H, n, alpha)
-        elif style == "orbs":
-            self.draw_orbs(p, W, H, n, alpha)
-        else:
-            self.draw_smooth(p, W, H, n)
+        # Ореол всей фигуры. У искр он свой, встроенный в частицы — если
+        # добавить ещё и общий, свечение станет вдвое жирнее и вдвое дороже.
+        if style != "sparks":
+            try:
+                sg = float(np.clip(S.get("shape_glow", 0.0), 0.0, 3.0))
+            except Exception:
+                sg = 0.0
+            if sg > 0.02:
+                self._draw_glow(p, W, H, n, alpha, style, sg)
+        self._draw_figure(p, W, H, n, alpha, style)
         # виньетка: затемнение краёв экрана (0 = выкл)
         try:
             vs = float(np.clip(S.get("vignette", 0.0), 0.0, 1.0))
@@ -1003,6 +988,122 @@ class Overlay(QWidget):
         except Exception:
             pass
         p.end()
+
+    def _draw_figure(self, p, W, H, n, alpha, style):
+        """Нарисовать выбранную фигуру. Вынесено из paintEvent, потому что
+        тот же самый рисунок нужен для ореола: без общего метода пришлось бы
+        дублировать все шестнадцать веток стиля."""
+        if style == "bars":
+            self.draw_bars(p, W, H, n, alpha)
+        elif style == "peak":
+            self.draw_bars(p, W, H, n, alpha, caps=True)
+        elif style == "circle":
+            self.draw_circle(p, W, H, n, alpha)
+        elif style == "combo":
+            self.draw_bars(p, W, H, n, alpha)
+            self.draw_smooth(p, W, H, n)
+        elif style == "fill":
+            self.draw_fill(p, W, H, n)
+        elif style == "ribbon":
+            self.draw_ribbon(p, W, H, n)
+        elif style == "radial":
+            self.draw_radial(p, W, H, n, alpha)
+        elif style == "rays":
+            self.draw_rays(p, W, H, n, alpha)
+        elif style == "particles":
+            self.draw_particles(p, W, H, n, alpha)
+        elif style == "sparks":
+            self.draw_sparks(p, W, H, n, alpha)
+        elif style == "arc":
+            self.draw_arc(p, W, H, n, alpha)
+        elif style == "spiral":
+            self.draw_spiral(p, W, H, n, alpha)
+        elif style == "mesh":
+            self.draw_mesh(p, W, H, n, alpha)
+        elif style == "stack":
+            self.draw_stack(p, W, H, n, alpha)
+        elif style == "orbs":
+            self.draw_orbs(p, W, H, n, alpha)
+        else:
+            self.draw_smooth(p, W, H, n)
+
+    def _blur_buf(self, img, radius, p, target):
+        """Размыть маленький буфер и сразу наложить на холст.
+
+        Считает QGraphicsBlurEffect, он же на C++. Свой разделимый гаусс на
+        numpy выходил 7 мс на буфер 320x180, а Qt укладывается в 0.7 — в десять
+        раз быстрее и без новой зависимости.
+
+        Важно, что scene.render берёт и размытие, и растяжение за один проход:
+        отдельно размывать в маленькую картинку и потом ещё раз растягивать
+        через drawImage стоило бы лишних миллисекунд. Сцена и эффект создаются
+        один раз — каждый кадр меняются только картинка и радиус.
+        """
+        try:
+            if self._gfx is None:
+                from PySide6.QtWidgets import (QGraphicsBlurEffect,
+                                               QGraphicsPixmapItem,
+                                               QGraphicsScene)
+                scene = QGraphicsScene(self)
+                item = QGraphicsPixmapItem()
+                fx = QGraphicsBlurEffect()
+                item.setGraphicsEffect(fx)
+                scene.addItem(item)
+                self._gfx = (scene, item, fx)
+            scene, item, fx = self._gfx
+            fx.setBlurRadius(max(0.01, float(radius)))
+            item.setPixmap(QPixmap.fromImage(img))
+            sw, sh = float(img.width()), float(img.height())
+            p.save()
+            p.setRenderHint(QPainter.SmoothPixmapTransform, True)
+            scene.render(p, target, QRectF(0.0, 0.0, sw, sh))
+            p.restore()
+        except Exception:
+            # лучше ореол без размытия, чем вовсе ничего
+            p.drawImage(target, img)
+
+    def _draw_glow(self, p, W, H, n, alpha, style, glow):
+        """Ореол вокруг всей фигуры — аналог CSS-овского drop-shadow.
+
+        Настоящего размытия в QPainter нет. Первый вариант был такой: рисовать
+        тот же рисунок вчетверо меньше и растягивать обратно, Qt при этом
+        сглаживает. Ореола не получалось — растянутая копия ложилась ровно
+        под фигуру и полностью ею закрывалась. Растянуть чуть больше нельзя:
+        размытие тогда растёт как доля экрана, и на 1920 это сотни пикселей
+        вместо положения в 10.
+
+        Поэтому размываем по-настоящему, но в уменьшенном буфере: радиус
+        получается маленьким, а вместе с ним и работа. Ореол рисуется ДО
+        основной фигуры, иначе лёг бы поверх неё.
+        """
+        shrink = 4
+        sw, sh = max(8, int(W) // shrink), max(8, int(H) // shrink)
+        img = QImage(sw, sh, QImage.Format_ARGB32_Premultiplied)
+        img.fill(Qt.transparent)
+        p2 = QPainter(img)
+        try:
+            p2.scale(1.0 / shrink, 1.0 / shrink)
+            p2.setRenderHint(QPainter.Antialiasing, False)
+            # В буфере фигура рисуется в полном масштабе координат, но в
+            # четверть пикселя: тонкая линия превращается в еле заметную
+            # точку. Поднимаем альфу, иначе ореол был бы почти пустым.
+            self._draw_figure(p2, W, H, n, min(255, int(alpha * 2.2)), style)
+        except Exception:
+            pass
+        finally:
+            p2.end()
+        # Радиус в пикселях полного кадра: 100 -> 5, 300 -> 14. И пересчёт в буфер,
+        # где он и правда маленький. При 96 полосах зазор между ними около
+        # трёх пикселей, так что на «полосах» любой ореол шире зальёт
+        # промежутки и сольёт их в сплошную массу — там держите 100.
+        p.save()
+        # Одно наложение с альфой. Раньше тут было три одинаковых drawImage,
+        # но это даёт ровно ту же картинку, что и одно с суммарной альфой,
+        # только втрое дороже.
+        p.setOpacity(min(0.75, 0.22 + 0.16 * glow))
+        self._blur_buf(img, (1.5 + 4.0 * glow) / shrink, p,
+                       QRectF(0.0, 0.0, float(W), float(H)))
+        p.restore()
 
     def _fill_path(self, xs, ys, y_base, S):
         """Залитая область под кривой. Стиль «контур» заливку не рисует —

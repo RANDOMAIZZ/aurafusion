@@ -1,5 +1,5 @@
 {
-  "style": "smooth",
+  "style": "sparks",
   "bars": 128,
   "overlay_fps": 60,
   "sensitivity": 3,
@@ -158,10 +158,10 @@
       "line_smooth": 1,
       "viz_y": 1,
       "viz_w": 1,
-      "spark_speed": 0.05,
-      "spark_boost": 6,
+      "spark_speed": 0.32,
+      "spark_boost": 1.01,
       "spark_density": 4,
-      "spark_glow": 1,
+      "spark_glow": 3,
       "spark_glow_start": 0,
       "spark_glow_end": 0
     }
