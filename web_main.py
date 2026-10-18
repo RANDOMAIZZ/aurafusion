@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""AuraFusion — web-интерфейс.
+"""AuraFusion — единственная точка входа: панель управления в браузере.
 
-То же ядро, что и в десктопном main.py (звук, цвет с экрана, RGB-движок,
-оверлей), но панель управления отдаётся в браузер. Десктопный вариант
-лежит рядом и не тронут — запускать можно что-то одно: они оба берут
-системный звук и пишут в подсветку, вдвоём работать не будут.
+Ядро (звук, цвет с экрана, RGB-движок, оверлей) живёт в core/ и ui/overlay.py.
+Отдельной десктопной панели на PySide6 больше нет — она не умела того, что
+умеет веб (например, прятать настройки, неуместные для выбранной фигуры),
+и держать две копии одного интерфейса было дороже, чем пользоваться браузером.
 
 Запуск:
     python web_main.py [--port 8765] [--host 127.0.0.1] [--no-browser]
@@ -147,8 +147,48 @@ from core.rgb_engine import (RGBEngine, hex_to_rgb, scale_color, kick_device_mod
                              is_gpu_like, is_ble_target)
 from ui.overlay import Overlay
 
-# OpenRGB поднимаем тем же кодом, что и десктопная версия
-from main import launch_openrgb
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+OPENRGB_CANDIDATES = [
+    os.path.join(BASE_DIR, "OpenRGB", "OpenRGB.exe"),
+    r"E:\MusicRGB\OpenRGB\OpenRGB.exe",
+]
+
+
+def find_openrgb():
+    for p in OPENRGB_CANDIDATES:
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def launch_openrgb(host, port):
+    """Поднять сервер OpenRGB, если его ещё нет.
+
+    Раньше эта функция жила в десктопном main.py, а веб импортировал её
+    оттуда. Стоило удалить main.py — и веб перестал запускаться совсем."""
+    import subprocess
+    exe = find_openrgb()
+    if not exe:
+        return False
+    try:
+        out = subprocess.run(["tasklist", "/fi", "IMAGENAME eq OpenRGB.exe"],
+                             capture_output=True, text=True, timeout=10).stdout
+        if "OpenRGB.exe" in out:
+            return True
+    except Exception:
+        pass
+    try:
+        log = open(os.path.join(BASE_DIR, "openrgb_stdout.log"), "ab", buffering=0)
+        subprocess.Popen([exe, "--server", "--server-host", host,
+                          "--server-port", str(port), "--startminimized"],
+                         stdout=log, stderr=subprocess.STDOUT,
+                         creationflags=subprocess.DETACHED_PROCESS
+                         | subprocess.CREATE_NEW_PROCESS_GROUP | 0x00004000)
+        return True
+    except Exception as e:
+        log.error("openrgb launch: %s", e)
+        return False
+
 
 STARTUP_NAME = "AuraFusionWeb"
 

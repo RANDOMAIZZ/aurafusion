@@ -158,7 +158,9 @@
       "line_smooth": 1,
       "viz_y": 1,
       "viz_w": 1,
-      "spark_speed": 0.25
+      "spark_speed": 0.19,
+      "spark_boost": 6,
+      "spark_density": 4
     }
   },
   "line_count": 64,

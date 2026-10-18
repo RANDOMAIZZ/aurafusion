@@ -1,6 +1,6 @@
-/* AuraFusion web UI — зеркало десктопной панели ui/panel.py.
-   Страницы описаны декларативно, чтобы структура совпадала с Panel._page_*.
-   Всё рисуется плитками (tile) внутри секций — см. style.css. */
+/* AuraFusion web UI — панель управления.
+   Страницы описаны декларативно в PAGES: по одной секции на раздел.
+   Оформление (tiles, кнопки, списки) — здесь и в style.css. */
 'use strict';
 
 let CFG = {}, DEVICES = [], MONITORS = [], AUDIO_NAMES = [];

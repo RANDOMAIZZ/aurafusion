@@ -30,13 +30,19 @@ if errorlevel 1 (
 ) else (
   echo [AuraFusion web] OpenRGB уже запущен.
 )
-rem десктопную панель глушим: она держит тот же звук и ту же подсветку
-taskkill /FI "IMAGENAME eq pythonw.exe" >nul 2>nul
+rem Гасим ТОЛЬКО предыдущий AuraFusion. Раньше здесь стоял taskkill по
+rem имени pythonw.exe — он убивал вообще все pythonw-процессы на машине,
+rem включая чужие скрипты. Теперь отбираем по командной строке.
+for /f "tokens=2" %%P in ('wmic process where "name='pythonw.exe' and commandline like '%%web_main%%'" get processid 2^>nul') do (
+  if not "%%P"=="" taskkill /PID %%P /F >nul 2>nul
+)
 ping -n 2 127.0.0.1 >nul
 echo [AuraFusion web] запуск, открою http://127.0.0.1:8765/
 start "AuraFusion web" /belownormal pythonw web_main.py
 ping -n 8 127.0.0.1 >nul
-tasklist /FI "IMAGENAME eq pythonw.exe" 2>nul | find /i "pythonw.exe" >nul
+rem проверяем именно наш процесс: просто наличие pythonw ничего не значит,
+rem на машине могут быть чужие pythonw
+wmic process where "name='pythonw.exe' and commandline like '%%web_main%%'" get processid 2>nul | find /i "processid" >nul
 if errorlevel 1 (
   echo [AuraFusion web] ОШИБКА: не запустилось. Для диагностики: python web_main.py
   pause
