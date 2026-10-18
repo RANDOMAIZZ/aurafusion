@@ -21,6 +21,7 @@ const api = {
   async state() { return (await fetch('/api/state')).json(); },
   async audio() { return (await fetch('/api/audio')).json(); },
   async monitors() { return (await fetch('/api/monitors')).json(); },
+  async scenes() { return (await fetch('/api/scenes')).json(); },
   async set(patch) {
     await fetch('/api/set', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -544,7 +545,63 @@ function fillBars(box, a, b, bg) {
   }
 }
 
+/* ---------- сцены: наборы настроек одним кликом ---------- */
+let SCENES = [];
+let activeScene = null;
+
+function mkScenes() {
+  const box = el('div', 'scenes');
+  box.dataset.scenes = '1';
+  renderScenes();
+  return box;
+}
+
+function renderScenes() {
+  const box = document.querySelector('.scenes');
+  if (!box) return;
+  box.textContent = '';
+  if (!SCENES.length) {
+    box.append(el('div', 'hint', 'Сцены не загрузились.'));
+    return;
+  }
+  const row = el('div', 'btnrow');
+  for (const s of SCENES) {
+    const b = el('button', 'btn scene' + (s.id === activeScene ? ' on' : ''), s.name);
+    b.title = s.hint || s.name;
+    b.addEventListener('click', async () => {
+      try {
+        const r = await fetch('/api/scene', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ id: s.id })
+        }).then(x => x.json());
+        if (!r || r.ok === false) { toast('сцена не применилась'); return; }
+        activeScene = s.id;
+        renderScenes();
+        toast(s.name + ' ✓');
+      } catch (e) {
+        toast('сервер не ответил');
+      }
+    });
+    row.append(b);
+  }
+  box.append(row);
+}
+
+async function loadScenes() {
+  try {
+    const r = await api.scenes();
+    SCENES = (r && r.scenes) || [];
+    renderScenes();
+  } catch (e) {
+    SCENES = [];
+  }
+}
+
 function mkThemeDD() {
+  // w объявляем сразу: ниже на него ссылается обработчик клика по кнопке.
+  // Если перенести объявление в конец функции, вызов упадёт с
+  // «Cannot access 'w' before initialization» — и страница «Система»
+  // перестанет собираться целиком.
   const w = el('div', 'dd wide');
   const btn = el('button', 'ddbtn');
   const bars = el('span', 'bars'); bars.id = 'ddThemeBars';
@@ -584,6 +641,7 @@ function mkThemeDD() {
     if (open) w.classList.add('open');
   });
   menu.addEventListener('click', e => e.stopPropagation());
+  w.append(btn, menu);
   return w;
 }
 function closeDD() { document.querySelectorAll('.dd.open').forEach(d => d.classList.remove('open')); }
@@ -774,6 +832,9 @@ const PAGES = {
       { t: 'slider', key: 'rgb_fps', label: 'FPS подсветки ПК', min: 1, max: 60, int: true },
       { t: 'slider', key: 'startup_delay_s', label: 'Пауза перед автостартом (с)', min: 0, max: 180, int: true },
     ]},
+    { g: 'Сцены', desc: 'Наборы настроек под то, что вы делаете. Одно нажатие переносит сразу всё: режим цвета, силу эффектов, прозрачность оверлея.', items: [
+      { t: 'scenes' },
+    ]},
     { g: 'Оформление', desc: 'Цвета интерфейса. На саму подсветку и звук не влияет.', items: [
       { t: 'themes' },
     ]},
@@ -805,6 +866,7 @@ const findC = (page, key) => PAGES[page].flatMap(s => s.items || []).find(c => c
 /* ================= сборка ================= */
 function buildControl(c) {
   if (c.t === 'themes') return mkThemeDD();
+  if (c.t === 'scenes') return mkScenes();
   if (c.t === 'catalog') return mkCatalog();
   if (c.t === 'devs') {
     const box = el('div', 'devs');
@@ -1033,6 +1095,9 @@ function startStream() {
   } catch (_) { /* сервер без профилей — показываем всё */ }
   BG.build();
   buildAll();
+  // сцены — после сборки: renderScenes() ищет готовый блок в DOM, а во время
+  // buildAll() он ещё не подвешен, и кнопок просто не появлялось
+  await loadScenes();
   applyStyleProfile();
   applyTheme(CFG.web_theme || 'neon');   // после сборки: кнопка и галочки уже в DOM
   await refreshMonitors();

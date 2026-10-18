@@ -54,6 +54,9 @@ DEFAULTS = {
     # Оверлей не залезает на панель задач. Иначе на автоскрытии она выезжает
     # под оверлей и кажется, что не поднялась.
     "avoid_taskbar": True,
+    # Сцены: именованные наборы настроек, переключаются одним кликом.
+    # Пустой список — приложение подставит свои сцены при первом запуске.
+    "scenes": [],
     # --- цвет с экрана (общий для оверлея и ПК) ---
     "follow_screen": True,      # главный тумблер Ambilight
     "exclude_viz": True,        # не учитывать волну и панель при замере цвета
@@ -145,6 +148,10 @@ def load():
             # поэтому обычный фильтр по ключам его бы отбросил
             if isinstance(data.get("style_settings"), dict):
                 cfg["style_settings"] = data["style_settings"]
+            # scenes — список словарей, в DEFAULTS он пустой, поэтому обычный
+            # фильтр по ключам его бы отбросил
+            if isinstance(data.get("scenes"), list):
+                cfg["scenes"] = [s for s in data["scenes"] if isinstance(s, dict)]
     except Exception as e:
         print(f"[config] load warn: {e}")
     for k in INT_KEYS:

@@ -253,6 +253,11 @@ button{font-family:inherit;}
 .grid.wide{grid-template-columns:1fr;}
 .btnrow{grid-column:1 / -1;display:flex;flex-wrap:wrap;gap:9px;}
 .btnrow .btn{flex:1 1 170px;}
+/* сцены: плитки чуть ниже и уже, чтобы читались как переключатель режимов,
+   а не как основные кнопки панели */
+.scenes{grid-column:1 / -1;}
+.scenes .btnrow .btn{flex:1 1 130px;padding:11px 8px;font-size:13px;}
+.scenes .btn.scene.on{border-color:var(--accent,#4fd2ff);box-shadow:0 0 0 1px var(--accent,#4fd2ff) inset;}
 
 /* ---------- плитка настройки ---------- */
 .tile{

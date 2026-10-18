@@ -141,6 +141,7 @@ class GuiBridge(QObject):
 from core import config as C
 from core import ble_strip
 from core import openrgb_raw
+from core import scenes
 from core.audio_engine import SharedAudio
 from core.screen_color import ScreenColor
 from core.rgb_engine import (RGBEngine, hex_to_rgb, scale_color, kick_device_mode,
@@ -640,6 +641,24 @@ def action(name):
     return deco
 
 
+def apply_scene(core, sid):
+    """Применить сцену по id. Возвращает применённый patch или None.
+
+    Сцену ищем и среди готовых, и среди пользовательских, и пропускаем через
+    scenes.sanitize: сцены лежат в конфиге на диске, а он тоже редактируется
+    руками. Ключи вне SAFE_KEYS (устройства, порты, автозапуск) отсекаются —
+    иначе сцена могла бы выключить подсветку не там или сломать запуск."""
+    for s in scenes.all_scenes(core.cfg):
+        if s.get("id") != sid:
+            continue
+        clean = scenes.sanitize(s)
+        if not clean:
+            return None
+        core.set_keys(clean["patch"])
+        return clean["patch"]
+    return None
+
+
 def style_profiles():
     """Список фигур и набор настроек для каждой.
 
@@ -731,6 +750,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"screens": core.screens})
         if path == "/api/styles":
             return self._json(style_profiles())
+        if path == "/api/scenes":
+            return self._json({"scenes": scenes.all_scenes(core.cfg)})
         if path == "/api/stream":
             return self._stream(core)
         self.send_error(404)
@@ -766,6 +787,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/set":
                 core.set_keys(data.get("patch") or {})
                 return self._json({"ok": True})
+            if path == "/api/scene":
+                # применение сцены: подставляем её patch обычным set_keys,
+                # поэтому побочные эффекты (монитор, клик сквозь, прозрачность)
+                # срабатывают те же самые, что и при ручной правке
+                res = apply_scene(core, data.get("id"))
+                return self._json({"ok": res is not None, "result": res or {}})
             if path == "/api/action":
                 name = data.get("name") or ""
                 fn = ACTIONS.get(name)

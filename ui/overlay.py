@@ -8,6 +8,8 @@ from PySide6.QtCore import QRect, QRectF, Qt, QTimer, Slot
 from PySide6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QApplication, QWidget
 
+from core import beat as beat_mod
+
 # --- полоса панели задач -------------------------------------------------------
 # Панель задач на автоскрытии не поднимается, когда оверлей включён. Причина в
 # том, что оверлей — окно WindowStaysOnTopHint размером во весь экран: он
@@ -359,6 +361,15 @@ class Overlay(QWidget):
         self._last_eff_op = -1.0
         self._wave = np.zeros(1024, dtype=np.float32)
         self._level = 0.0
+        # Детектор темпа. Держим здесь, а не в audio_engine: оверлей — единственное
+        # место, где спектр уже нормализован (авто-баланс, dynamics, сглаживание),
+        # и только здесь можно честно ловить удары. От нуля, потому что при
+        # включении темп неизвестен и набирается за несколько секунд.
+        self._beat = beat_mod.BeatTracker(fps=self._fps())
+        self._beat_pulse = 0.0
+        self._beat_fired = False
+        self._beat_t = 0.0
+        self._beat_in = np.zeros(cfg.get("bars", 64), dtype=np.float32)
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
                             | Qt.Tool | Qt.WindowDoesNotAcceptFocus)
@@ -763,6 +774,12 @@ class Overlay(QWidget):
                     balanced.append(part)
             spec = np.concatenate(balanced).astype(np.float32)
         spec = np.tanh(spec * float(S.get("dynamics", 1.8))).astype(np.float32)
+        # Копия спектра ДО сглаживания по времени. Детектору темпа нужен
+        # именно он: после attack/release удар становится пологим, и на
+        # быстром темпе (160 BPM это 22.5 кадра на удар при 60 fps) половина
+        # атак просто терялась. Сырой спектр — единственное место, где
+        # скачок энергии ещё виден как скачок.
+        self._beat_in = spec
         cap = float(np.clip(S.get("max_level", 1.0), 0.1, 1.0))
         if cap < 1.0:
             spec = soft_cap(spec, cap)
@@ -783,6 +800,29 @@ class Overlay(QWidget):
             bass_now = 0.0
         self._bass = max(bass_now, getattr(self, "_bass", 0.0) * 0.88)
         self.sc.bass = self._bass
+
+        # ---------- темп и доля ----------
+        # Кормим детектор нормализованным спектром. Он ловит удары по росту
+        # энергии и сам ищет период повтора — это ровнее, чем порог по басу:
+        # порог срабатывал дважды на один удар на треках с быстрым затуханием
+        # и не срабатывал вовсе там, где бас широкий.
+        #
+        # Время отдаём шагом 1/fps, а не настенными часами: тогда темп не
+        # плывёт, когда система подвисает. Если смотреть на time.time(), то при
+        # просадке с 60 до 20 fps детектор решил бы, что музыка замедлилась
+        # втрое, и перестал бы попадать в удары.
+        fps_now = self._fps()
+        if abs(fps_now - self._beat.fps) > 1.0:
+            # сменили fps оверлея — пересобираем историю под новую частоту
+            self._beat = beat_mod.BeatTracker(fps=fps_now)
+        self._beat_t = getattr(self, "_beat_t", 0.0) + 1.0 / fps_now
+        try:
+            self._beat_fired = bool(self._beat.update(
+                getattr(self, "_beat_in", self.lines), dt=1.0 / fps_now,
+                has_sig=bool(has_sig or demo)))
+        except Exception:
+            self._beat_fired = False
+        self._beat_pulse = float(self._beat.pulse(self._beat_t))
         # Число линий и плавность — настройки самой фигуры. Считаем один раз
         # здесь, до всех рисовалок: раньше каждая сглаживала спектр сама, а
         # круг, лучи, кольца, дуга и спираль не сглаживали вовсе, и число
@@ -1695,6 +1735,18 @@ class Overlay(QWidget):
         # баса, и на подвижной музыке без низов искры почти не появлялись.
         prev = st["prev"]
         st["prev"] = loud
+        # Пучок на долю. Когда темп найден, всплеск бьём по фазе, а не по
+        # порогу громкости: удар приходит ровно там, где надо, и один раз,
+        # а не два. Порог остаётся запасным вариантом — пока темп не
+        # определён (первые секунды трека, тихая музыка, шум).
+        beat_ok = self._beat is not None and self._beat.bpm > 0.0
+        if beat_ok:
+            fired = bool(self._beat_fired)
+        else:
+            fired = bool(loud > 0.03 and loud > prev * 1.10 + 0.004)
+        # сколько энергии в текущем ударе: на доле бьём сильнее
+        pulse = float(getattr(self, "_beat_pulse", 0.0)) if beat_ok else 0.0
+
         if not alive:
             flow = 0.0
         else:
@@ -1703,8 +1755,8 @@ class Overlay(QWidget):
             # целиком зависел от баса, и на музыке без низов искры почти не
             # появлялись. Здесь минимум 0.10 от громкости: тихо, но видно.
             flow = (0.10 + 0.55 * loud) * cap * dens * dt
-            if loud > 0.03 and loud > prev * 1.10 + 0.004:
-                flow += (6.0 + loud * 55.0) * dens       # пучок на всплеске
+            if fired:
+                flow += (6.0 + loud * 55.0) * dens * (1.0 + 0.6 * pulse)
         st["acc"] = min(st["acc"] + flow, cap * 0.35)  # не копим в долг
         burst = int(st["acc"])
         st["acc"] -= burst
