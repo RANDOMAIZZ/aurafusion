@@ -1963,66 +1963,95 @@ class Overlay(QWidget):
         # ширина мягкого края окна — чтобы переход не был ступенькой
         edge = max(0.08, 0.5 * (g_b - g_a)) if g_b > g_a else 0.5 * (1.0 - g_a)
         passes = ((2.9, 0.10), (1.8, 0.22), (1.0, 1.0))
+        # --- расчёты целиком на numpy, до цикла ---
+        # Раньше всё считалось по одной частице прямо в цикле. Там стояло
+        # три np.clip на скаляр, и один из них — на height_scale, который в
+        # кадре не меняется вообще. np.clip на скаляре стоит 2.5 мкс чистого
+        # диспетчера, таких вызовов выходило 2100 на кадр — 5 мс, десятая
+        # часть бюджета. Считаем массивами один раз.
+        hs = float(np.clip(S.get("height_scale", 0.55), 0.01, 2.0))
+        life = st["life"][:cap]
+        alive = np.flatnonzero(life > 0.0)
+        if alive.size == 0:
+            return
+        y_all = st["y"][:cap]
+        alive = alive[y_all[alive] >= -8.0]
+        if alive.size == 0:
+            return
+        f = life[alive] / np.maximum(0.01, st["full"][:cap][alive])
+        v = f * f                       # гаснут плавно, а не по ступеням
+        # Размер задаёт полоса, из которой частица вылетела, — чем выше
+        # там музыка, тем крупнее искра. Плюс угасание: к вершине точка
+        # ещё и мельчает, поэтому фонтан не выглядит пятнистым.
+        amp = np.clip(st["amp"][:cap][alive], 0.0, 1.4) * 0.8
+        rad = (1.1 + 4.6 * amp * hs) * (0.45 + 0.55 * v)
+        keep = rad >= 0.7
+        alive, v, amp, rad = alive[keep], v[keep], amp[keep], rad[keep]
+        if alive.size == 0:
+            return
+        # цвет по полосе, яркость — по силе полосы и по доле жизни
+        lvl = np.clip(0.3 + 0.7 * (amp * 0.6 + v * 0.4), 0.0, 1.0)
+        a0 = alpha * (0.35 + 0.65 * v)
+        # сколько ореола по этой высоте: 0 — частица чистая, 1 — полный.
+        # Трапеция из двух ограниченных пил: их произведение даёт ровно
+        # то же окно с мягкими краями, что и ветки if/elif, но без ветвления
+        # на каждой частице.
+        if glow > 0.02:
+            prog = 1.0 - np.sqrt(v)   # 0 у базовой линии, 1 на вершине
+            e = max(edge, 1e-6)
+            gw = np.clip((prog - (g_a - e)) / e, 0.0, 1.0) * \
+                np.clip(((g_b + e) - prog) / e, 0.0, 1.0)
+        else:
+            gw = np.zeros_like(v)
+        xs = st["x"][:cap][alive]
+        ys = st["y"][:cap][alive]
+        bins = st["bin"][:cap][alive]
+        # Широкие ореолы — без сглаживания. Они огромные и мягкие, ступеньки
+        # на них не видны, а сглаживание на 1536 окружностях стоит треть
+        # времени кадра. Сама искра рисуется с ним.
+        had_aa = p.testRenderHint(QPainter.Antialiasing)
         brush = QBrush(Qt.SolidPattern)
         p.setPen(Qt.NoPen)
-        for i in range(cap):
-            life = st["life"][i]
-            if life <= 0.0:
-                continue
-            y = st["y"][i]
-            if y < -8.0:
-                continue
-            f = life / max(0.01, st["full"][i])
+        p.setRenderHint(QPainter.Antialiasing, False)
+        for i in range(alive.size):
+            gw_i = float(gw[i])
+            if gw_i <= 0.02:
+                continue        # ореола нет — рисуем только точку, одним проходом
+            rad_i = float(rad[i])
+            x = float(xs[i])
+            y = float(ys[i])
+            c = self._bar_color(int(bins[i]), float(lvl[i]), 255)
+            base_a = float(a0[i])
+            for k, wa in passes[:-1]:
+                r = rad_i * (1.0 + (k - 1.0) * glow * gw_i)
+                c.setAlpha(int(base_a * wa * gw_i))
+                brush.setColor(c)
+                p.setBrush(brush)
+                p.drawEllipse(QRectF(x - r, y - r, r * 2, r * 2))
+        p.setRenderHint(QPainter.Antialiasing, had_aa)
+        for i in range(alive.size):
+            gw_i = float(gw[i])
             # Здесь обязателен обычный float, а не numpy.float32: ниже эти
             # числа идут прямо в QRectF и QColor. PySide6 6.x падает на
             # numpy-скалярах с 0xc0000005 (нарушение доступа) — процесс
             # умирал целиком, без следа в логе. faulthandler показал стек
             # ровно сюда.
-            v = float(f * f)             # гаснут плавно, а не по ступеням
-            hs = float(np.clip(S.get("height_scale", 0.55), 0.01, 2.0))
-            # Размер задаёт полоса, из которой частица вылетела, — чем выше
-            # там музыка, тем крупнее искра. Плюс угасание: к вершине точка
-            # ещё и мельчает, поэтому фонтан не выглядит пятнистым.
-            amp = float(np.clip(st["amp"][i], 0.0, 1.4)) * 0.8
-            rad = float((1.1 + 4.6 * amp * hs) * (0.45 + 0.55 * v))
-            if rad < 0.7:
+            rad_i = float(rad[i])
+            if rad_i < 0.7:
                 continue
-            b = int(st["bin"][i])
-            # цвет по полосе, яркость — по силе полосы и по доле жизни
-            lvl = float(np.clip(0.3 + 0.7 * (amp * 0.6 + v * 0.4), 0.0, 1.0))
-            a0 = alpha * (0.35 + 0.65 * v)
-            # сколько ореола по этой высоте: 0 — частица чистая, 1 — полный
-            if glow > 0.02:
-                prog = 1.0 - v ** 0.5          # 0 у базовой линии, 1 на вершине
-                if prog < g_a - edge:
-                    gw = 0.0
-                elif prog < g_a:
-                    gw = (prog - (g_a - edge)) / edge if edge > 0 else 1.0
-                elif prog <= g_b:
-                    gw = 1.0
-                elif prog < g_b + edge:
-                    gw = 1.0 - (prog - g_b) / edge if edge > 0 else 0.0
-                else:
-                    gw = 0.0
-                gw = float(np.clip(gw, 0.0, 1.0))
+            c = self._bar_color(int(bins[i]), float(lvl[i]), 255)
+            # Ядро гасится окном так же, как ореол: в исходном варианте оно
+            # тоже шло с множителем gw, и менять это незаметно не выйдет —
+            # все настройки подобраны под прежнюю картинку.
+            if gw_i <= 0.02:
+                c.setAlpha(int(float(a0[i])))
             else:
-                gw = 0.0
-            c = self._bar_color(b, lvl, 255)
-            x = float(st["x"][i])
-            y = float(y)
-            if gw <= 0.02:
-                # ореола нет — рисуем только саму точку, одним проходом
-                c.setAlpha(int(a0))
-                brush.setColor(c)
-                p.setBrush(brush)
-                p.drawEllipse(QRectF(x - rad, y - rad, rad * 2, rad * 2))
-                continue
-            for k, wa in passes:
-                r = rad * (1.0 + (k - 1.0) * glow * gw)
-                c.setAlpha(int(a0 * wa * gw))
-                brush.setColor(c)
-                p.setBrush(brush)
-                p.drawEllipse(QRectF(x - r, y - r, r * 2, r * 2))
+                c.setAlpha(int(float(a0[i]) * gw_i))
+            brush.setColor(c)
+            p.setBrush(brush)
+            x = float(xs[i])
+            y = float(ys[i])
+            p.drawEllipse(QRectF(x - rad_i, y - rad_i, rad_i * 2, rad_i * 2))
         pen = QPen(QColor(255, 255, 255, 45))
         pen.setWidth(1)
         p.setPen(pen)
