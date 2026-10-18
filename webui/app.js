@@ -245,6 +245,27 @@ function onSat(v) {
    Значение, сказанное панелью, игнорируем — доверяем ответу сервера, он
    видит настоящее состояние записи в Run. Иначе галочка мигнёт «назад»,
    если что-то пошло не так. */
+/* Сообщаем серверу, где на экране окно панели: сервер вырежет его из кадра
+   замера цвета. Без этого оверлей измеряет сам себя — в панели есть цветные
+   кружки цвета экрана и цвета ПК, и при резкой смене картинки на экране
+   обратная связь раскачивает цвет оверлея.
+
+   screenX/screenY — положение окна в координатах экрана, outerWidth/Height —
+   размер вместе с рамкой. Шлём не чаще раза в 2 с: при переносе окна
+   мышью событие move сыпется десятками раз в секунду. */
+let panelGeomAt = 0;
+async function reportPanelGeom() {
+  const now = Date.now();
+  if (now - panelGeomAt < 2000) return;
+  panelGeomAt = now;
+  try {
+    await api.act('panel_geom', {
+      x: window.screenX, y: window.screenY,
+      w: window.outerWidth, h: window.outerHeight
+    });
+  } catch (e) { /* панель просто останется незарезанной */ }
+}
+
 async function onAutostart(v, box) {
   try {
     const r = await api.act('autostart', { on: !!v });
@@ -1146,4 +1167,10 @@ function startStream() {
     if (e.key >= '1' && e.key <= '5') goto(keys[+e.key - 1]);
     if (e.code === 'Space') { e.preventDefault(); api.act('toggle_rgb'); }
   });
+
+  // положение окна сообщаем сразу и дальше при переносе/изменении размера
+  reportPanelGeom();
+  window.addEventListener('resize', reportPanelGeom);
+  window.addEventListener('focus', reportPanelGeom);
+  setInterval(reportPanelGeom, 4000);
 })();

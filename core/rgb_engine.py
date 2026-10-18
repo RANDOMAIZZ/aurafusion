@@ -430,12 +430,28 @@ class RGBEngine(threading.Thread):
                         last_sig = (prev, tuple(cols))
                         last_send_t = now_m
                     except Exception as e:
-                        if any(is_ble_target(t) for t, _ in ts) and not need_orgb:
+                        # Ошибку BLE надо показывать всегда. Раньше ветка с
+                        # подробным разбором стояла только когда BLE-устройство
+                        # было единственным: если в списке есть ещё и OpenRGB,
+                        # падение ленты уезжало в общую ветку и выглядело как
+                        # «переподключение к OpenRGB...». При этом реальная
+                        # причина терялась: в логе её не было, в статусе её не
+                        # было, и по панели выглядело так, будто лента просто
+                        # не подключена.
+                        if any(is_ble_target(t) for t, _ in ts):
                             self.log("rgb: сбой BLE-цели: %s", e)
-                            state["status"] = "BLE-лента: переподключение..."
-                            self._targets = None
-                            self._sig = None
-                            last_sig = None
+                            state["error"] = "BLE: %s" % str(e)[:160]
+                            if not need_orgb:
+                                state["status"] = "BLE-лента: переподключение..."
+                                self._targets = None
+                                self._sig = None
+                                last_sig = None
+                                self.stop_flag.wait(1.0)
+                                continue
+                            # OpenRGB-устройства в списке есть, но ронять их
+                            # из-за ленты незачем: оставляем как есть и просто
+                            # показываем, что лента не в порядке.
+                            state["status"] = "RGB работает | лента не отвечает"
                             self.stop_flag.wait(1.0)
                             continue
                         try:

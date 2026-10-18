@@ -161,17 +161,18 @@
       "line_count": 256
     },
     "sparks": {
-      "height_scale": 0.65,
+      "height_scale": 0.46,
       "line_count": 256,
       "line_smooth": 1,
       "viz_y": 1,
       "viz_w": 1,
       "spark_speed": 0.4,
-      "spark_boost": 6,
+      "spark_boost": 3.72,
       "spark_density": 4,
       "spark_glow": 3,
       "spark_glow_start": 1,
-      "spark_glow_end": 0
+      "spark_glow_end": 0,
+      "spark_dark": 0.07
     }
   },
   "line_count": 64,
@@ -183,6 +184,7 @@
   "shape_glow": 0.0,
   "spark_glow_start": 0.0,
   "spark_glow_end": 0.55,
+  "spark_dark": 0.25,
   "beat_pulse": true,
   "beat_strength": 0.55,
   "overlay_opacity": 1,
@@ -277,7 +279,7 @@
   "ble_scan_s": 8,
   "ble_max_fps": 20,
   "web_theme": "ember",
-  "autostart": true,
+  "autostart": false,
   "autosave": true,
   "openrgb_host": "127.0.0.1",
   "openrgb_port": 6742

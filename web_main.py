@@ -669,12 +669,44 @@ class Core:
         }
         if extra_devices:
             cfg_devs = self.cfg.get("devices", {})
+            # Состояние подключения BLE отдаём наружу: connected/error живут
+            # в core/ble_strip.py, но наверх не поднимались, и по панели
+            # отличить «лента отвалилась» от «лента горит чёрным» было
+            # невозможно — а это две разные поломки с разными лекарствами.
+            ble_state = _ble_state()
             out["devices"] = [
                 {"name": n, "zones": z, "enabled": cfg_devs.get(n, {}).get("enabled", True),
-                 "ble": cfg_devs.get(n, {}).get("transport") == "ble"}
+                 "ble": cfg_devs.get(n, {}).get("transport") == "ble",
+                 "ble_state": _ble_for(cfg_devs, n, ble_state)}
                 for n, z in self.devices.items()
             ]
         return out
+
+
+def _ble_state():
+    """Что сейчас с каждой BLE-лентой: адрес -> подключена ли и что за ошибка."""
+    out = {}
+    try:
+        from core import ble_strip
+        for addr, st in list(getattr(ble_strip, "_registry", {}).items()):
+            out[addr] = {"connected": bool(getattr(st, "connected", False)),
+                         "error": str(getattr(st, "error", "") or "")}
+    except Exception:
+        pass
+    return out
+
+
+def _ble_for(cfg_devs, name, ble_state):
+    """Состояние ленты для конкретного устройства из списка."""
+    info = cfg_devs.get(name) or {}
+    addr = str(info.get("addr", "") or info.get("address", "")).upper()
+    st = ble_state.get(addr) or {}
+    return {"addr": addr,
+            "connected": bool(st.get("connected")),
+            "error": st.get("error", ""),
+            # лента не трогает GATT, пока нечего посылать, поэтому «не
+            # подключена» при пустом цене — это норма, а не поломка
+            "idle": not addr}
 
 
 ACTIONS = {}
@@ -880,6 +912,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": res is not None, "result": res or {}})
             if path == "/api/action":
                 name = data.get("name") or ""
+                if name == "panel_geom":
+                    return self._json({"ok": True, "result": _panel_geom(core, data.get("args") or {})})
                 if name == "autostart":
                     # on лежит внутри args, а не на верхнем уровне тела:
                     # панель шлёт {name, args:{on}}. Раньше читалось
@@ -895,6 +929,37 @@ class Handler(BaseHTTPRequestHandler):
             log.error("action %s failed: %s", path, e)
             return self._json({"ok": False, "error": str(e)}, 500)
         self.send_error(404)
+
+
+def _panel_geom(core, args):
+    """Запомнить, где на экране окно панели, чтобы вырезать его из замера.
+
+    Браузер знает своё положение на экране (window.screenX/screenY), а оверлей
+    про него не знал ничего: код вырезания в ui/overlay.py был написан, но
+    переменная _panel_geom нигде не присваивалась, поэтому условие
+    `pg is not None` никогда не выполнялось.
+
+    В панели есть цветные кружки, показывающие цвет экрана и цвет ПК. Пока
+    окно не вырезано, оверлей измеряет эти кружки: его собственный цвет
+    возвращается ему через панель, и при резкой смене картинки на экране
+    обратная связь раскачивается — оверлей переливается цветами, которых на
+    экране нет.
+    """
+    def num(k, d):
+        try:
+            return float(args.get(k, d))
+        except (TypeError, ValueError):
+            return float(d)
+    x, y = num("x", -1), num("y", -1)
+    w, h = num("w", 0), num("h", 0)
+    if w <= 0 or h <= 0:
+        with core._lock:
+            core.overlay._panel_geom = None
+        return {"geom": None}
+    g = (int(x), int(y), int(w), int(h))
+    with core._lock:
+        core.overlay._panel_geom = g
+    return {"geom": g}
 
 
 def _autostart(core, on):

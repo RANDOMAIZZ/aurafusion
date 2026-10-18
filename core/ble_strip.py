@@ -70,15 +70,6 @@ class BleStrip:
         self._last_log = ""
         self._last_log_at = 0.0
 
-    def _log_once(self, msg, every=60.0):
-        """Написать в лог, если такого сообщения ещё не было или оно старое."""
-        now = time.monotonic()
-        if msg == self._last_log and now - self._last_log_at < every:
-            return
-        self._last_log = msg
-        self._last_log_at = now
-        self._log(msg)
-
         self._loop = asyncio.new_event_loop()
         self._thread = threading.Thread(target=self._loop_thread,
                                         name=f"ble-loop-{self.addr}", daemon=True)
@@ -96,6 +87,15 @@ class BleStrip:
         self._writer = threading.Thread(target=self._writer_thread,
                                         name=f"ble-rgb-{self.addr}", daemon=True)
         self._writer.start()
+
+    def _log_once(self, msg, every=60.0):
+        """Написать в лог, если такого сообщения ещё не было или оно старое."""
+        now = time.monotonic()
+        if msg == self._last_log and now - self._last_log_at < every:
+            return
+        self._last_log = msg
+        self._last_log_at = now
+        self._log(msg)
 
     # ---------- жизненный цикл ----------
     def _loop_thread(self):
