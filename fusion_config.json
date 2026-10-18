@@ -3,7 +3,7 @@
   "bars": 128,
   "overlay_fps": 60,
   "sensitivity": 3,
-  "dynamics": 1,
+  "dynamics": 1.32,
   "max_level": 1.0,
   "height_scale": 1.2,
   "color_mode": "custom",
@@ -153,7 +153,7 @@
       "line_count": 256
     },
     "sparks": {
-      "height_scale": 0.83,
+      "height_scale": 0.47,
       "line_count": 256,
       "line_smooth": 1,
       "viz_y": 1,
@@ -171,7 +171,7 @@
   "beat_pulse": true,
   "beat_strength": 0,
   "overlay_opacity": 1.0,
-  "bass_gain": 0.96,
+  "bass_gain": 1.32,
   "mid_gain": 2.5,
   "treble_gain": 3,
   "auto_balance": true,
