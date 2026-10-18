@@ -241,7 +241,7 @@ def per_style_keys(style):
     keys = {"height_scale", "line_count", "line_smooth"}
     if style == "sparks":
         # скорость, разгон и плотность — только у искр, у остальных фигур их нет
-        keys |= {"spark_speed", "spark_boost", "spark_density"}
+        keys |= {"spark_speed", "spark_boost", "spark_density", "spark_glow"}
     if style in BASE_STYLES:
         keys |= {"viz_x", "viz_y", "viz_w"}
     if style in CENTER_STYLES:
@@ -1840,6 +1840,16 @@ class Overlay(QWidget):
         cap = st["cap"]
 
         # --- рисуем живые, у краёв экрана и по ту сторону базы убираем ---
+        # Свечение — несколько проходов от широкого слабого ореола к самой
+        # искре, аналог CSS-овского drop-shadow. В браузере это одна строка
+        # filter, в Qt приходится рисовать втрое: широкая обводка с малой
+        # альфой, средняя, и только потом сама точка.
+        #
+        # Проходов три на кадр, а не один, поэтому при нулевом свечении
+        # возвращаемся к одиночной отрисовке — иначе платим втрое за то,
+        # что выключено.
+        glow = float(np.clip(S.get("spark_glow", 0.5), 0.0, 1.0))
+        passes = ((2.9, 0.10), (1.8, 0.22), (1.0, 1.0)) if glow > 0.02 else ((1.0, 1.0),)
         brush = QBrush(Qt.SolidPattern)
         p.setPen(Qt.NoPen)
         for i in range(cap):
@@ -1867,10 +1877,16 @@ class Overlay(QWidget):
             b = int(st["bin"][i])
             # цвет по полосе, яркость — по силе полосы и по доле жизни
             lvl = float(np.clip(0.3 + 0.7 * (amp * 0.6 + v * 0.4), 0.0, 1.0))
-            brush.setColor(self._bar_color(b, lvl, int(alpha * (0.35 + 0.65 * v))))
-            p.setBrush(brush)
-            p.drawEllipse(QRectF(float(st["x"][i]) - rad, float(y) - rad,
-                                 rad * 2, rad * 2))
+            a0 = alpha * (0.35 + 0.65 * v)
+            c = self._bar_color(b, lvl, 255)
+            x = float(st["x"][i])
+            y = float(y)
+            for k, wa in passes:
+                r = rad * (1.0 + (k - 1.0) * glow)
+                c.setAlpha(int(a0 * wa))
+                brush.setColor(c)
+                p.setBrush(brush)
+                p.drawEllipse(QRectF(x - r, y - r, r * 2, r * 2))
         pen = QPen(QColor(255, 255, 255, 45))
         pen.setWidth(1)
         p.setPen(pen)

@@ -32,6 +32,7 @@ DEFAULTS = {
     "spark_speed": 1.0,         # базовая скорость подъёма искр
     "spark_boost": 1.0,         # насколько скорость растёт на громкой частоте
     "spark_density": 1.0,       # плотность искр, 1.0 — умеренно
+    "spark_glow": 0.5,         # свечение искр: ореол вокруг точки, 0 = выкл
     "beat_pulse": True, "beat_strength": 0.35,
     "overlay_opacity": 1.0,
     "bass_gain": 1.0, "mid_gain": 1.25, "treble_gain": 1.7,
