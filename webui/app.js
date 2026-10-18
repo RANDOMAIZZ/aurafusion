@@ -67,20 +67,26 @@ function mkSlider(c) {
   s.min = c.min; s.max = c.max; s.step = 1;
   well.append(s);
   w.append(well);
+  // div — на сколько делить показатель (0.55 хранится как 55 при div:100),
+  // mul — на сколько умножать (доля 1.0 хранится как 100 при mul:100).
+  // Раньше для области замера стоял div без mul, и ползунок «Ширина, %»
+  // показывал 1 вместо 100: в конфиге лежит доля, а шкала в процентах.
   const div = c.div || 1;
+  const mul = c.mul || 1;
   const paint = (raw) => {
-    const stored = raw / div;
+    const stored = raw / div * mul;
     v.textContent = c.int ? String(Math.round(stored)) : stored.toFixed(2);
     s.style.setProperty('--fill', ((raw - c.min) / (c.max - c.min) * 100) + '%');
   };
   const push = () => {
-    const patch = { [c.key]: c.int ? Math.round(s.value / div) : s.value / div };
-    if (c.onchange) c.onchange(s.value / div, s); else put(patch);
+    const out = s.value / div * mul;
+    const patch = { [c.key]: c.int ? Math.round(out) : out };
+    if (c.onchange) c.onchange(out, s); else put(patch);
   };
   s.addEventListener('input', () => { paint(+s.value); push(); });
   s.addEventListener('change', () => { paint(+s.value); push(); });
   c.setValue = (stored) => {
-    s.value = Math.min(c.max, Math.max(c.min, Math.round(stored * div)));
+    s.value = Math.min(c.max, Math.max(c.min, Math.round(stored / mul * div)));
     paint(+s.value);
   };
   return w;
@@ -255,6 +261,11 @@ function onSat(v) {
    мышью событие move сыпется десятками раз в секунду. */
 let panelGeomAt = 0;
 async function reportPanelGeom() {
+  // скрытая вкладка не отчитывается: у неё window.outerWidth/Height могут
+  // быть любыми, в том числе размером экрана. При нескольких открытых
+  // вкладках AuraFusion именно скрытая перебивала бы видимую, и сервер
+  // считал бы, что окно закрывает весь экран.
+  if (document.hidden || document.visibilityState !== 'visible') return;
   const now = Date.now();
   if (now - panelGeomAt < 2000) return;
   panelGeomAt = now;
@@ -333,7 +344,9 @@ function onColorMon(v) { api.set({ color_monitor: parseInt(v, 10) || -1 }); }
 function onOvMon(v) { api.set({ monitor: parseInt(v, 10) || 0 }); }
 function onSysCheck(k, v) {
   api.set({ [k]: !!v });
-  if (k === 'autostart') api.act('autostart', { value: !!v });
+  // сервер читает args.on. Раньше здесь было { value: ... }, сервер получал
+  // undefined и всегда выключал автозапуск, а панель показывала «включено».
+  if (k === 'autostart') onAutostart(!!v);
 }
 
 /* ================= настройки по стилям =================
@@ -747,7 +760,7 @@ const PAGES = {
       { t: 'slider', key: 'spark_glow', label: 'Свечение искр', min: 0, max: 300, div: 100, desc: 'Ореол вокруг частицы, как drop-shadow в CSS. 0 — точки чистые и дешёвые, 100 — умеренный ореол, 300 — широкий светящийся шлейф.' },
       { t: 'slider', key: 'spark_glow_start', label: 'Свечение снизу', min: 0, max: 100, div: 100, desc: 'С какой высоты ореол начинает гореть. 0 — с самой базовой линии.' },
       { t: 'slider', key: 'spark_glow_end', label: 'Свечение сверху', min: 0, max: 100, div: 100, desc: 'На какой высоте ореол гаснет. 100 — горит до самой вершины. Если «снизу» поднять выше, чем «сверху», искры внизу будут чистыми и загорятся только у верха.' },
-      { t: 'slider', key: 'spark_dark', label: 'Темнота искр', min: 0, max: 100, div: 100, desc: 'Насколько искры могут быть тёмными. 100 — как есть, строго тем же цветом, что определился с экрана. 0 — всегда ярко и насыщенно: цвета, ушедшие в темноту, поднимаются и очищаются. На тёмном видео при 0 искры видны, а при 100 почти гаснут.' },
+      { t: 'slider', key: 'color_dark', label: 'Темнота цвета', min: 0, max: 100, div: 100, desc: 'Насколько цвета могут быть тёмными — и фигура, и подсветка ПК. 100 — как есть, строго тем же цветом, что определился с экрана. 0 — всегда ярко и насыщенно: ушедшие в темноту цвета поднимаются и очищаются. Серый и белый остаются серым и белым: насыщать нечего, и ранняя версия превращала серый кадр в бирюзовый. На тёмном видео при 0 видно, при 100 почти гаснет.' },
       { t: 'slider', key: 'height_scale', label: 'Размер / высота', min: 1, max: 200, div: 100 },
       { t: 'slider', key: 'fig_size', label: 'Размер фигуры', min: 20, max: 250, div: 100 },
       { t: 'slider', key: 'viz_w', label: 'Ширина', min: 20, max: 100, div: 100 },
@@ -807,6 +820,7 @@ const PAGES = {
         ['Только экран', 'screen'], ['Только музыка', 'music']] },
       { t: 'check', key: 'follow_screen', label: 'Авто-цвет под экран', onchange: onFollow, id: 'followRgb' },
       { t: 'slider', key: 'rgb_saturation', label: 'Насыщенность авто-цвета', min: 0, max: 150, div: 100, onchange: onSat, id: 'satRgb' },
+      { t: 'slider', key: 'color_dark', label: 'Темнота цвета', min: 0, max: 100, div: 100, desc: 'Ограничение снизу на то, насколько тёмным может быть цвет. 100 — строго цвет с экрана, 0 — всегда ярко и насыщенно. Тот же параметр, что и у фигуры на странице «Визуал».' },
       { t: 'slider', key: 'dark_threshold', label: 'Порог темноты (0 = выкл)', min: 0, max: 255, int: true },
       { t: 'slider', key: 'rgb_gain_r', label: 'Баланс R', min: 30, max: 150, div: 100 },
       { t: 'slider', key: 'rgb_gain_g', label: 'Баланс G', min: 30, max: 150, div: 100 },
@@ -832,20 +846,22 @@ const PAGES = {
         mini: refreshMonitors, options: [] },
       { t: 'select', key: 'color_region', label: 'Область замера', wide: true, id: 'regionSel', onchange: onRegion,
         options: [['Весь экран', 'full'], ['Центр', 'center'], ['Верх', 'top'], ['Низ', 'bottom'], ['Своя...', 'custom']] },
-      { t: 'slider', key: 'color_rx', label: 'Область X, %', min: 0, max: 100, int: true, onchange: onRegionCustom },
-      { t: 'slider', key: 'color_ry', label: 'Область Y, %', min: 0, max: 100, int: true, onchange: onRegionCustom },
-      { t: 'slider', key: 'color_rw', label: 'Область Ширина, %', min: 0, max: 100, int: true, onchange: onRegionCustom },
-      { t: 'slider', key: 'color_rh', label: 'Область Высота, %', min: 0, max: 100, int: true, onchange: onRegionCustom },
+      { t: 'slider', key: 'color_rx', label: 'Область X, %', min: 0, max: 100, int: true, mul: 100, onchange: onRegionCustom },
+      { t: 'slider', key: 'color_ry', label: 'Область Y, %', min: 0, max: 100, int: true, mul: 100, onchange: onRegionCustom },
+      { t: 'slider', key: 'color_rw', label: 'Область Ширина, %', min: 0, max: 100, int: true, mul: 100, onchange: onRegionCustom },
+      { t: 'slider', key: 'color_rh', label: 'Область Высота, %', min: 0, max: 100, int: true, mul: 100, onchange: onRegionCustom },
     ]},
     { g: 'Ambilight: экран → ПК', desc: 'Как быстро и какой цвет ПК принимает от экрана.', items: [
       { t: 'check', key: 'follow_screen', label: 'ПК следует за экраном', onchange: onFollow, id: 'followAmb' },
       { t: 'check', key: 'exclude_viz', label: 'Не учитывать волну при замере' },
+      { t: 'check', key: 'panel_blocks', label: 'Панель во весь экран мешает замеру', desc: 'Выключено — цвет берётся с того, что на экране, включая саму панель. Включено — при панели во весь экран замер встаёт и держится последний цвет.' },
+      { t: 'slider', key: 'color_sample_ms', label: 'Как часто мерить экран, мс', min: 33, max: 1000, int: true, desc: 'Сколько миллисекунд между снятиями кадра. Это и есть отклик: цвет не может смениться быстрее, чем придёт следующий кадр. Снимок стоит 33 мс, так что ниже 33 смысла нет, а чаще 60 съедает заметную долю процессора. Съёмка идёт в отдельном потоке, поэтому короткий интервал не рвёт отрисовку.' },
       { t: 'slider', key: 'auto_speed', label: 'Скорость подтяжки к экрану', min: 5, max: 100, div: 100 },
       { t: 'slider', key: 'rgb_saturation', label: 'Насыщенность ПК', min: 0, max: 150, div: 100, onchange: onSat, id: 'satAmb' },
       { t: 'slider', key: 'color_hold', label: 'Держать цвет, замеров', min: 1, max: 6, int: true },
       { t: 'slider', key: 'color_speed', label: 'Скорость перехода цвета', min: 2, max: 50, div: 100 },
       { t: 'select', key: 'color_fx', label: 'Эффект смены', options: [
-        ['Плавный', 'smooth'], ['Мгновенный', 'instant'], ['Радуга', 'rainbow'],
+        ['Плавный', 'smooth'], ['Мгновенный (быстрее всех)', 'instant'], ['Радуга', 'rainbow'],
         ['Дыхание', 'breathe'], ['Пульс от баса', 'beat']] },
       { t: 'select', key: 'color_algo', label: 'Алгоритм цвета', options: [
         ['Сочный (точный оттенок)', 'juicy'], ['Средний (плавный)', 'average'], ['K-means (3 кластера)', 'kmeans']] },
@@ -1090,10 +1106,19 @@ function applyState(s) {
   st.append(a);
   st.classList.toggle('err', !!s.error);
   if (s.error) st.append(document.createTextNode(` • ⚠ ${s.error}`));
+  // Интерфейс закрывает экран — «цвет как на экране» молча берёт его самого.
+  // Без этой подсказки выглядит так, будто сломан сам замер цвета.
+  if (s.screen_color_blocked) {
+    const w = document.createTextNode(
+      ` • 👁 интерфейс закрывает экран (${Math.round((s.panel_cover || 0) * 100)}%), цвет с экрана не берётся`);
+    st.append(w);
+    st.classList.add('err');
+  }
 
   const ss = $('#sidestatus');
-  ss.textContent = `${s.status}\n${s.audio_status}` + (s.error ? `\n⚠ ${s.error}` : '');
-  ss.classList.toggle('err', !!s.error);
+  ss.textContent = `${s.status}\n${s.audio_status}` + (s.error ? `\n⚠ ${s.error}` : '')
+    + (s.screen_color_blocked ? `\n👁 интерфейс закрывает экран (${Math.round((s.panel_cover || 0) * 100)}%)` : '');
+  ss.classList.toggle('err', !!s.error || !!s.screen_color_blocked);
 
   const b = $('#btnRgb');
   b.textContent = s.running_rgb ? '❚❚ RGB СТОП' : '▶ RGB СТАРТ';

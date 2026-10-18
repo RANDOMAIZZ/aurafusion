@@ -415,6 +415,11 @@ class Core:
         try:
             if "overlay_fps" in keys:
                 gui.post(self.overlay.apply_fps)
+            if "color_sample_ms" in keys:
+                # Интервал замера читался только при запуске, поэтому ползунок
+                # менял цифру в конфиге и ничего больше. Теперь применяется
+                # сразу: таймер просто перезапускается с новым шагом.
+                gui.post(self.overlay.apply_sample_ms)
             if "overlay_opacity" in keys:
                 gui.post(self.overlay.apply_opacity)
             if "monitor" in keys:
@@ -661,6 +666,27 @@ class Core:
             "audio_device": self.cfg.get("audio_device", "") or "авто",
             "audio_active": getattr(self.audio, "active", "") or "",
             "brightness": float(st.get("rgb_brightness", 0.0)),
+            # Почему может не работать цвет с экрана: интерфейс закрывает его
+            # целиком. Молча это выглядит как «цвет сломался», хотя настройки
+            # верные, — потому показываем прямо.
+            "screen_color_blocked": bool(getattr(self.overlay, "_panel_blocked", False)),
+            "panel_cover": round(float(getattr(self.overlay, "_panel_cover", 0.0)), 2),
+            # Сама найденная геометрия окна панели. Без неё в состоянии видно
+            # только «закрывает 100%», и непонятно откуда взялось: окно не
+            # найдено, найдено не то или найдено свёрнутым. Три разные причины
+            # лечатся по-разному, а выглядят одинаково.
+            "panel_geom": list(getattr(self.overlay, "_panel_geom", None) or []),
+            "panel_geom_src": getattr(self.overlay, "_panel_geom_src", ""),
+            "panel_on_top": bool(getattr(self.overlay, "_panel_on_top", False)),
+            # Откуда берутся отказы замера. Цвет держится на прошлом значении
+            # не из-за «лени», а когда кадр не дошёл; без этих счётчиков
+            # «то реагирует, то зависает» нечем было лечить.
+            "sample_stat": dict(getattr(self.overlay, "_stat", {}) or {}),
+            # Реальный fps оверлея, а не заданный в настройках. Разница видна
+            # сразу: настроено 60, выдаёт 22 — значит кадр не укладывается.
+            "overlay_fps_actual": round(float(getattr(self.overlay, "_fps_real", 0.0)), 1),
+            "grab_busy": bool(getattr(self.overlay, "_grab_busy", False)),
+            "grab_core": getattr(self.overlay, "_grab_core", None),
             "saved_at": self.saved_flash,
             "devices_total": len(self.devices),
             # для фоновой анимации: бас + компактный спектр (считаем один раз)
@@ -912,14 +938,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": res is not None, "result": res or {}})
             if path == "/api/action":
                 name = data.get("name") or ""
+                if name == "dump_sample":
+                    return self._json({"ok": True, "result": _dump_sample(core)})
                 if name == "panel_geom":
                     return self._json({"ok": True, "result": _panel_geom(core, data.get("args") or {})})
                 if name == "autostart":
                     # on лежит внутри args, а не на верхнем уровне тела:
                     # панель шлёт {name, args:{on}}. Раньше читалось
                     # data.get("on") — всегда None, то есть всегда «выключить».
-                    return self._json({"ok": True, "result": _autostart(
-                        core, (data.get("args") or {}).get("on"))})
+                    a = data.get("args") or {}
+                    # on — основное имя; value принимаем тоже, потому что
+                    # старая панель слала именно его и галочка работала
+                    # только наполовину
+                    want = a.get("on", a.get("value"))
+                    return self._json({"ok": True, "result": _autostart(core, want)})
                 fn = ACTIONS.get(name)
                 if fn is None:
                     return self._json({"ok": False, "error": "неизвестное действие"}, 400)
@@ -931,6 +963,134 @@ class Handler(BaseHTTPRequestHandler):
         self.send_error(404)
 
 
+def _dump_sample(core):
+    """Выгрузить то, что оверлей реально видит на экране.
+
+    Нужен для разбора «цвет определяется неверно»: агент в своём контексте
+    снимает экран и всегда получает чёрный кадр, а у живого процесса
+    grabWindow работает. Поэтому снимок и числа делает сам оверлей.
+    """
+    import numpy as np
+    from core import screen_color as SC
+    try:
+        arr = core.overlay._last_sample
+        if arr is None:
+            return {"ok": False, "error": "сэмпл ещё не снят"}
+        arr = np.asarray(arr, dtype=np.float32)
+        h, w = arr.shape[0], arr.shape[1]
+        lines = ["сэмпл %dx%d" % (w, h)]
+        flat = (np.clip(arr, 0, 1) * 255).astype(int).reshape(-1, 3)
+        q = (flat // 24).astype(np.int32)
+        key = q[:, 0] * 121 + q[:, 1] * 11 + q[:, 2]
+        uniq, cnt = np.unique(key, return_counts=True)
+        order = np.argsort(-cnt)[:8]
+        tot = float(cnt.sum())
+        lines.append("крупнейшие пятна в кадре замера:")
+        for i in order:
+            if cnt[i] < tot * 0.005:
+                continue
+            m = key == uniq[i]
+            avg = flat[m].mean(axis=0).astype(int)
+            mx = flat[m].max(axis=1)
+            mn = flat[m].min(axis=1)
+            sat = float(((mx - mn) / np.maximum(mx, 1)).mean())
+            lines.append("   %5.2f%%  rgb(%3d,%3d,%3d)  насыщ.%.2f"
+                         % (100.0 * cnt[i] / tot, avg[0], avg[1], avg[2], sat))
+        lines.append("алгоритмы на этом же кадре:")
+        lines.append("   average  %02X%02X%02X" % tuple(SC.average_target(arr)))
+        lines.append("   juicy    %02X%02X%02X" % tuple(SC.juicy_target(arr, {}, 1)))
+        lines.append("   kmeans   %02X%02X%02X" % tuple(SC.kmeans_target(arr, lock={})))
+        st = core.state
+        lines.append("в приложении сейчас: screen=%s pc=%s raw=%s shown=%s"
+                     % (st.get("screen_hex"), st.get("pc_hex"),
+                        np.round(core.overlay.sc.raw).astype(int).tolist(),
+                        np.round(core.overlay.sc.shown).astype(int).tolist()))
+        lines.append("настройки: %s" % {k: core.cfg.get(k) for k in
+                                        ("color_region", "color_algo", "color_hold",
+                                         "auto_speed", "color_speed", "exclude_viz",
+                                         "shape_color", "color_monitor")})
+        pg = getattr(core.overlay, "_panel_geom", None)
+        lines.append("геометрия панели от браузера: %s  <- None значит панель "
+                     "НЕ вырезана из замера" % (pg,))
+        # и сам кадр картинкой, чтобы посмотреть глазами что именно измеряется
+        from PIL import Image
+        p = os.path.join(BASE_DIR, ".overlay_shots", "sample.png")
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        Image.fromarray((np.clip(arr, 0, 1) * 255).astype("uint8")).resize(
+            (w * 6, h * 6), Image.NEAREST).save(p)
+        lines.append("кадр сохранён: %s" % p)
+        txt = os.path.join(BASE_DIR, ".overlay_shots", "sample.txt")
+        with open(txt, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines))
+        return {"ok": True, "path": p, "text": txt}
+    except Exception as e:
+        return {"ok": False, "error": "%s: %s" % (type(e).__name__, e)}
+
+
+def detect_panel_rect():
+    """Найти окно панели средствами Windows.
+
+    Возвращает пару: (прямоугольник окна или None, на переднем ли оно плане).
+
+    Браузер сообщает своё положение через window.screenX/screenY/
+    outerWidth/outerHeight, и это ненадёжно: у развёрнутого окна Opera
+    outerWidth равен ширине экрана даже когда вкладка показывает половину
+    страницы. Поэтому ищем окно напрямую — заголовок панели начинается с
+    «AuraFusion», и это видит сама Windows, а не догадка из браузера.
+
+    Прямоугольник и «на переднем ли плане» — разные вещи, и нужны обе:
+
+    - вырезать панель из кадра надо, даже когда она сзади: она всё равно
+      занимает место в кадре, пока её видно;
+    - объявлять, что «интерфейс закрывает экран», можно только когда
+      панель на переднем плане. Раньше это не проверялось, и выходило
+      так: окно панели развёрнуто на весь экран, лежит на заднем плане,
+      пользователь смотрит видео в другом окне — а оверлей всё равно
+      объявлял «100%» и замер вставал. Окно позади ничего не закрывает:
+      видно то, что впереди.
+
+    Свёрнутое окно (IsIconic) не берём: в панели задач оно висит, но экран
+    не занимает. Свои окна (оверлей, трей) пропускаем по PID.
+    """
+    try:
+        import win32gui
+        import win32process
+    except ImportError:
+        return None, False
+    me = os.getpid()
+    try:
+        fg = win32gui.GetForegroundWindow()
+        handles = []
+        win32gui.EnumWindows(lambda h, _a: handles.append(h), None)
+    except Exception:
+        return None, False
+    best = None
+    for h in handles:
+        try:
+            if not win32gui.IsWindowVisible(h):
+                continue
+            if win32gui.IsIconic(h):
+                continue          # свёрнуто в панель задач — не занимает экран
+            title = win32gui.GetWindowText(h)
+            if not title or "aurafusion" not in title.lower():
+                continue
+            _, pid = win32process.GetWindowThreadProcessId(h)
+            if pid == me:
+                continue
+            l, t, r, b = win32gui.GetWindowRect(h)
+        except Exception:
+            continue
+        w, ht = r - l, b - t
+        if w <= 120 or ht <= 120:
+            continue
+        area = w * ht
+        if best is None or area > best[0]:
+            best = (area, (int(l), int(t), int(w), int(ht)), h == fg)
+    if best is None:
+        return None, False
+    return best[1], best[2]
+
+
 def _panel_geom(core, args):
     """Запомнить, где на экране окно панели, чтобы вырезать его из замера.
 
@@ -939,11 +1099,10 @@ def _panel_geom(core, args):
     переменная _panel_geom нигде не присваивалась, поэтому условие
     `pg is not None` никогда не выполнялось.
 
-    В панели есть цветные кружки, показывающие цвет экрана и цвет ПК. Пока
-    окно не вырезано, оверлей измеряет эти кружки: его собственный цвет
-    возвращается ему через панель, и при резкой смене картинки на экране
-    обратная связь раскачивается — оверлей переливается цветами, которых на
-    экране нет.
+    Прямоугольник, который больше экрана, не принимаем: при нескольких
+    открытых вкладках отчёт может прийти от скрытой, а у неё размеры окна
+    бывают любыми. Иначе оверлей решил бы, что интерфейс закрывает всё, и
+    замер встал бы совсем.
     """
     def num(k, d):
         try:
@@ -952,14 +1111,31 @@ def _panel_geom(core, args):
             return float(d)
     x, y = num("x", -1), num("y", -1)
     w, h = num("w", 0), num("h", 0)
-    if w <= 0 or h <= 0:
+    ok = w > 0 and h > 0
+    if ok:
+        try:
+            sc = core.overlay.screen()
+            geo = sc.geometry() if sc is not None else None
+            if geo is not None and geo.width() > 0:
+                if w > geo.width() * 1.25 or h > geo.height() * 1.25:
+                    ok = False
+        except Exception:
+            pass
+    if not ok:
         with core._lock:
             core.overlay._panel_geom = None
-        return {"geom": None}
+            core.overlay._panel_geom_src = "браузер отклонил"
+        return {"geom": None, "rejected": True}
     g = (int(x), int(y), int(w), int(h))
     with core._lock:
         core.overlay._panel_geom = g
-    return {"geom": g}
+        core.overlay._panel_geom_src = "браузер"
+    # Передним планом браузер себя назвать не может, а рапорт он шлёт
+    # раз в 4 секунды из вкладки, которая может быть и на заднем плане.
+    # Поэтому «закрывает экран» от браузера не включаем — определитель
+    # windows всё равно скажет точно через 3 секунды. Лишний замер хуже,
+    # чем лишняя маска, а вот застывший цвет не разморозить.
+    return {"geom": g, "rejected": False}
 
 
 def _autostart(core, on):
@@ -1109,8 +1285,74 @@ def _pump(core, app):
     mon()
 
     s = QTimer(app)
-    s.timeout.connect(core.save)
+
+    def autosave():
+        # Флаг проверяем здесь, а не один раз при старте: иначе переключатель
+        # «Автосохранение» выглядел бы работающим, но через 5 секунд таймер
+        # всё равно писал бы конфиг на диск.
+        try:
+            if core.cfg.get("autosave", True):
+                core.save()
+        except Exception:
+            pass
+
+    s.timeout.connect(autosave)
     s.start(5000)        # автосохранение: без него настройки терялись бы при выходе
+
+
+def _panel_front(core, on_top):
+    """Переключить «панель на переднем плане», отфильтровав дребезг.
+
+    Windows меняет активное окно часто — на клик, на смену вкладки, просто по
+    своему таймеру, — и без фильтра «панель то впереди, то сзади» скакал
+    6 раз за 15 секунд: замер то брался, то нет, и цвет дёргался.
+
+    Фильтр сделан по ВРЕМЕНИ, а не по числу ответов. Вариант «два одинаковых
+    ответа» при опросе раз в 3 секунды давал 6 секунд ожидания, а с включённым
+    «Мгновенным» эффектом это читалось как «цвет меняется через 6 секунд» —
+    ровно то, на что жаловался пользователь. Теперь опрос идёт часто
+    (см. _panel_timer), и ждать нужно меньше секунды.
+    """
+    ov = core.overlay
+    st = getattr(core, "_panel_front", None)
+    if st is None:
+        st = {"last": None, "since": 0.0}
+        core._panel_front = st
+    now = time.monotonic()
+    on_top = bool(on_top)
+    if on_top != st["last"]:
+        st["last"] = on_top
+        st["since"] = now
+        return
+    if now - st["since"] < 0.45:
+        return
+    ov._panel_on_top = on_top
+
+
+def _panel_timer(core, app):
+    """Быстрый опрос окна панели.
+
+    Отдельный таймер, а не сторож: сторож ходит раз в 3 секунды и нужен для
+    того, чтобы чинить, — а передний план надо знать быстро, от него
+    напрямую зависит, берётся ли цвет с экрана. Опрос стоит меньше
+    миллисекунды (EnumWindows по видимым окнам), так что 400 мс не жалко.
+    """
+    t = QTimer(app)
+
+    def poll():
+        try:
+            g, on_top = detect_panel_rect()
+            ov = core.overlay
+            if g != getattr(ov, "_panel_geom", None):
+                ov._panel_geom = g
+                ov._panel_geom_src = "win32" if g else "не найдено"
+            _panel_front(core, on_top)
+        except Exception:
+            pass
+
+    t.timeout.connect(poll)
+    t.start(400)
+    return t
 
 
 def _watchdog(core, app, httpd):
@@ -1136,6 +1378,21 @@ def _watchdog(core, app, httpd):
                 return
         except Exception:
             log.exception("сторож: не смог проверить сервер")
+
+        # Окно панели ищем сами, средствами Windows: браузер сообщает
+        # outerWidth неверно (у развёрнутого окна он равен ширине экрана).
+        # Передний план проверяем тут же и тут же: окно могло уйти в фон,
+        # а геометрия остаться прежней — тогда «закрывает экран» надо
+        # снять, иначе замер встанет, хотя перед пользователем видео.
+        try:
+            g, on_top = detect_panel_rect()
+            ov = core.overlay
+            if g != getattr(ov, "_panel_geom", None):
+                ov._panel_geom = g
+                ov._panel_geom_src = "win32" if g else "не найдено"
+            _panel_front(core, on_top)
+        except Exception:
+            pass
 
         try:
             ov = core.overlay
@@ -1230,6 +1487,7 @@ def main():
     threading.Thread(target=_run_server, args=(httpd,), daemon=True,
                      name="aura-web").start()
     _watchdog(core, app, httpd)
+    _panel_timer(core, app)
     url = f"http://{host}:{port}/"
     log.info("web ui: %s", url)
     print(f"[AuraFusion web] {url}  (Ctrl+C — выход)")

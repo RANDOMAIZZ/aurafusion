@@ -11,6 +11,7 @@ import threading
 import time
 
 from . import openrgb_raw
+from .screen_color import lift_one
 
 
 def hex_to_rgb(h):
@@ -294,7 +295,8 @@ class RGBEngine(threading.Thread):
             rgb = (int(shown[0]), int(shown[1]), int(shown[2]))
             rgb = saturate_color(*rgb, cfg.get("rgb_saturation", 0.6))
             rgb = apply_gains(rgb, cfg)
-            return apply_dark_threshold(rgb, cfg)
+            rgb = apply_dark_threshold(rgb, cfg)
+            return lift_one(rgb, cfg.get("color_dark", 0.25))
         # music — статичный
         try:
             if cfg.get("color_all"):
@@ -303,7 +305,8 @@ class RGBEngine(threading.Thread):
                 res = hex_to_rgb(t.get("color_hex", cfg.get("static_color", "#C50DF1")))
         except Exception:
             res = (197, 13, 241)
-        return apply_dark_threshold(res, cfg)
+        res = apply_dark_threshold(res, cfg)
+        return lift_one(res, cfg.get("color_dark", 0.25))
 
     def run(self):
         state = self.state

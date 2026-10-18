@@ -1,7 +1,10 @@
 """Прозрачный click-through оверлей AuraFusion (smooth/bars/circle/combo)."""
 import ctypes
 import math
+import threading
 import time
+
+import logging
 
 import numpy as np
 from PySide6.QtCore import QRect, QRectF, Qt, QTimer, Slot
@@ -10,6 +13,9 @@ from PySide6.QtGui import (QBrush, QColor, QImage, QLinearGradient, QPainter,
 from PySide6.QtWidgets import QApplication, QWidget
 
 from core import beat as beat_mod
+from core.screen_color import lift_rgb
+
+log = logging.getLogger("aurafusion.overlay")
 
 # --- полоса панели задач -------------------------------------------------------
 # Панель задач на автоскрытии не поднимается, когда оверлей включён. Причина в
@@ -229,7 +235,7 @@ COMMON_KEYS = {
     "style", "fill_color", "bars", "sensitivity", "dynamics",
     "bass_gain", "mid_gain", "treble_gain", "auto_balance",
     "overlay_opacity", "overlay_fps", "monitor",
-    "color_mode", "shape_color", "color_fx", "custom_color", "alpha",
+    "color_mode", "shape_color", "color_fx", "custom_color", "alpha", "color_dark",
     "beat_pulse", "beat_strength",
     "shake", "zoom", "flash", "vignette", "bg_dim", "dim_pulse",
     "sys_fx", "sys_mode", "sys_zoom", "sys_shake",
@@ -248,7 +254,7 @@ def per_style_keys(style):
     if style == "sparks":
         # скорость, разгон и плотность — только у искр, у остальных фигур их нет
         keys |= {"spark_speed", "spark_boost", "spark_density", "spark_glow",
-                "spark_glow_start", "spark_glow_end", "spark_dark"}
+                "spark_glow_start", "spark_glow_end"}
     if style in BASE_STYLES:
         keys |= {"viz_x", "viz_y", "viz_w"}
     if style in CENTER_STYLES:
@@ -375,6 +381,26 @@ class Overlay(QWidget):
         # попадает в кадр замера, а в ней цветные кружки цвета экрана и цвета
         # ПК: оверлей измеряет сам себя через панель, и цвет начинает гулять.
         self._panel_geom = None
+        self._panel_geom_src = ""     # откуда пришла геометрия: win32/браузер
+        self._panel_on_top = False    # окно панели на переднем плане?
+        self._last_sample = None
+        # Счётчики отбракованных кадров. Цвет держится на прошлом значении
+        # не «из-за лени», а когда кадр не дошёл: слишком тёмный, или после
+        # вырезания оверлея не осталось ничего живого. Раньше обе причины
+        # выглядели одинаково — «цвет завис», и непонятно где искать.
+        self._stat = {"ok": 0, "dark": 0, "masked": 0, "err": 0,
+                      "busy": 0, "skip": 0, "None": 0}
+        # Честный fps оверлея. Считаем сами окна, а не верим настройке:
+        # раньше в панели показывалось заданное значение, а не то, что
+        # выдаёт машина, и просадки были не видны вообще.
+        # Имя не _fps: метод _fps() уже есть и отдаёт ЗАДАННУЮ в настройках
+        # скорость. Атрибут с тем же именем затёр бы метод, и приложение падало
+        # бы при старте на TypeError: 'float' object is not callable.
+        self._fps_n = 0
+        self._fps_at = time.monotonic()
+        self._fps_real = 0.0
+        self._panel_blocked = False
+        self._panel_cover = 0.0
         self._wave = np.zeros(1024, dtype=np.float32)
         self._level = 0.0
         # Детектор темпа. Держим здесь, а не в audio_engine: оверлей — единственное
@@ -411,7 +437,43 @@ class Overlay(QWidget):
         self.sysfx = SysFX(enabled=bool(cfg.get("sys_fx", False)))
         self.color_timer = QTimer(self)
         self.color_timer.timeout.connect(self.sample_screen_color)
-        self.color_timer.start(500)
+        # Снимать экран стоит 33 мс — Qt тянет кадр 1920x1080, а уменьшить
+        # дешевле нечем: через GDI BitBlt кадр приходит чёрным, DWM своё
+        # содержимое так не отдаёт. Раньше этот вызов висел на главном потоке,
+        # и при частом интервале панель и оверлей заметно замирали.
+        # Теперь съёмка ушла в отдельный поток: главный поток только просит,
+        # поэтому короткий интервал больше не рвёт отрисовку. Поток один, и
+        # запросы не копятся: пока идёт съёмка, следующий пропускается.
+        self._grab_gate = threading.Lock()
+        self._grab_want = threading.Event()
+        self._grab_busy = False
+        self._grab_core = None      # ядро, отведённое под съёмку
+        self._grab_thread = threading.Thread(target=self._grab_loop,
+                                             daemon=True, name="aura-grab")
+        self._grab_thread.start()
+        self._sample_ms = self._interval_ms()
+        self.color_timer.start(self._sample_ms)
+
+    def _interval_ms(self):
+        """Интервал замера, зажатный в разумные границы."""
+        try:
+            return int(np.clip(float(self._cfg().get("color_sample_ms", 60)), 33, 2000))
+        except (TypeError, ValueError):
+            return 60
+
+    def apply_sample_ms(self):
+        """Перезапустить таймер замера на новое значение, без перезапуска
+        приложения. Раньше интервал читался только в __init__, ползунок менял
+        цифру в конфиге — а по факту ничего."""
+        ms = self._interval_ms()
+        if ms == getattr(self, "_sample_ms", ms):
+            return
+        self._sample_ms = ms
+        try:
+            self.color_timer.stop()
+            self.color_timer.start(ms)
+        except Exception:
+            pass
 
     def _cfg(self):
         """Конфиг с наложенными настройками текущего стиля.
@@ -490,24 +552,168 @@ class Overlay(QWidget):
             if screen is None:
                 return
             rx, ry, rw, rh = resolve_region(cfg)
-            # рабочая копия покрупнее + кроп области в точных долях numpy
-            # (Qt-координаты copy() врут при масштабе экрана 125/150%)
-            pix = screen.grabWindow(0).scaled(480, 270, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-            img = pix.toImage().convertToFormat(QImage.Format_RGB888)
-            arr = qimage_to_sample(img, (rx, ry, rw, rh))
-            if arr is None:
+            # Интерфейс закрывает почти весь экран — измерять тогда нечего,
+            # кроме него самого. Берём последний удачный цвет и кадр не мутим.
+            # Раньше оверлей честно измерял тёмный интерфейс и красил себя его
+            # цветом, а интерфейс показывал цвет ПК, который брался из этого же
+            # оверлея. Замкнутый круг: цвет то догонял, то прыгал, а на резкой
+            # смене картинки уходил в радугу.
+            if self._panel_covers(screen):
+                if not self._panel_blocked:
+                    self._panel_blocked = True
+                    log.warning("интерфейс закрывает экран (%.0f%%) — цвет с экрана "
+                                "не берётся, держится последний",
+                                self._panel_cover * 100)
                 return
-            w, h = 96, 54
-            if float(arr.max()) <= 0.01:
-                return  # почти чёрный кадр (exclusive fullscreen, выкл. экран) —
-                # замера нет, держим последний цвет вместо нырка в чёрный
-            if cfg.get("exclude_viz", True):
-                self._blackout_viz(arr, w, h, cfg, screen.geometry(), (rx, ry, rw, rh))
-                if float(arr.max()) <= 0.01:
-                    return  # после вырезания волны ничего не осталось — замер врёт
-            self.sc.feed_frame(arr)
+            self._panel_blocked = False
+            # Съёмка ушла в отдельный поток: она занимает 33 мс, и на главном
+            # потоке такой блок при коротком интервале рвал отрисовку. Здесь
+            # только решаем, можно ли вообще мерить, и отдаём запрос.
+            with self._grab_gate:
+                if self._grab_busy:
+                    self._stat["busy"] += 1
+                    return
+                self._grab_busy = True
+            self._grab_job = {
+                "screen": screen,
+                "cfg": cfg,
+                "region": (rx, ry, rw, rh),
+                "exclude_viz": bool(cfg.get("exclude_viz", True)),
+            }
+            self._grab_want.set()
         except Exception:
-            pass
+            with self._grab_gate:
+                self._grab_busy = False
+
+    def _tune_grab_thread(self):
+        """Отобрать поток съёмки от потока отрисовки.
+
+        Съёмка кадра занимает 33 мс и раньше шла на равных правах с
+        отрисовкой. На этой машине это стоило 8 fps: 13 вместо 21. Проверено
+        A/B — с выключенной съёмкой fps выше, и найск окна панели тут ни при
+        чём (0.2 мс раз в 400 мс).
+
+        Что делаем:
+        - приоритет ниже обычного: планировщик Windows отдаст ядро отрисовке,
+          а съёмка доберёт своё в паузах;
+        - запрет приоритетного буста, чтобы поток не вытеснял главный;
+        - отдельное ядро: поток закрепляется за последним логическим ядром,
+          и это ядро убирается из маски процесса. Остальное приложение
+          (звук, BLE, сервер, отрисовка) на него не попадает.
+
+        Ядер 4 и меньше не трогаем: там отъезд одного ядра дороже самой
+        съёмки.
+        """
+        try:
+            import ctypes
+            k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            k32.GetCurrentThread.restype = ctypes.c_void_p
+            k32.GetCurrentThread.argtypes = []
+            k32.SetThreadPriority.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            k32.SetThreadPriority.restype = ctypes.c_int
+            k32.SetThreadAffinityMask.argtypes = [ctypes.c_void_p,
+                                                  ctypes.c_size_t]
+            k32.SetThreadAffinityMask.restype = ctypes.c_size_t
+            k32.SetThreadPriorityBoost.argtypes = [ctypes.c_void_p, ctypes.c_int]
+            k32.SetProcessAffinityMask.argtypes = [ctypes.c_void_p,
+                                                   ctypes.c_size_t]
+            k32.GetProcessAffinityMask.argtypes = [ctypes.c_void_p,
+                                                   ctypes.POINTER(ctypes.c_size_t),
+                                                   ctypes.POINTER(ctypes.c_size_t)]
+            k32.GetActiveProcessorCount.argtypes = [ctypes.c_uint16]
+            k32.GetCurrentProcess.restype = ctypes.c_void_p
+            k32.GetCurrentProcess.argtypes = []
+
+            THREAD_PRIORITY_BELOW_NORMAL = -1
+            h = k32.GetCurrentThread()
+            k32.SetThreadPriority(h, THREAD_PRIORITY_BELOW_NORMAL)
+            k32.SetThreadPriorityBoost(h, 0)          # 0 — буст выключен
+
+            n = int(k32.GetActiveProcessorCount(0xFFFF))   # ALL_PROCESSOR_GROUPS
+            if n < 4:
+                return
+            proc = k32.GetCurrentProcess()
+            sysmask = ctypes.c_size_t()
+            curmask = ctypes.c_size_t()
+            if not k32.GetProcessAffinityMask(proc,
+                                              ctypes.byref(sysmask),
+                                              ctypes.byref(curmask)):
+                return
+            last = max(n - 1, 63) if n > 64 else n - 1
+            one = ctypes.c_size_t(1 << last)
+            if not (curmask.value & one.value):
+                return
+            k32.SetThreadAffinityMask(h, one)
+            # это ядро убираем у всего остального процесса
+            k32.SetProcessAffinityMask(proc, ctypes.c_size_t(curmask.value & ~one.value))
+            self._grab_core = last
+        except Exception:
+            pass    # нет прав или старая система — просто работаем как есть
+
+    def _grab_loop(self):
+        """Поток съёмки: снять кадр, привести к 96x54, отдать цвету.
+
+        Здесь ничего не трогает виджеты: QScreen.grabWindow, QImage и numpy
+        работают вне главного потока. Общие с ним данные закрыты own_lock
+        у ScreenColor, а _last_sample перезаписывается целиком и читается
+        только для разбора.
+        """
+        self._tune_grab_thread()
+        while True:
+            self._grab_want.wait()
+            self._grab_want.clear()
+            try:
+                self._grab_once()
+            except Exception:
+                self._stat["err"] += 1
+            finally:
+                with self._grab_gate:
+                    self._grab_busy = False
+
+    def _grab_once(self):
+        job = getattr(self, "_grab_job", None)
+        if not job:
+            return
+        screen = job["screen"]
+        rx, ry, rw, rh = job["region"]
+        pix = screen.grabWindow(0).scaled(480, 270, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        img = pix.toImage().convertToFormat(QImage.Format_RGB888)
+        arr = qimage_to_sample(img, (rx, ry, rw, rh))
+        if arr is None:
+            self._stat["None"] += 1
+            return
+        w, h = 96, 54
+        if float(arr.max()) <= 0.01:
+            self._stat["dark"] += 1
+            return  # почти чёрный кадр (exclusive fullscreen, выкл. экран) —
+            # замера нет, держим последний цвет вместо нырка в чёрный
+        if job["exclude_viz"]:
+            self._blackout_viz(arr, w, h, job["cfg"], screen.geometry(),
+                               (rx, ry, rw, rh))
+            live = int((arr.reshape(-1, 3).max(axis=1) > 0.01).sum())
+            self._stat["live"] = live
+            if float(arr.max()) <= 0.01:
+                # Вырезали оверлей и не осталось НИЧЕГО живого. Маска для
+                # искр раздувается вместе с их свечением и накрывает весь
+                # кадр — вырезать becomes' то же самое, что не мерить вовсе,
+                # и цвет навсегда замирает на прошлом. Лучше лишний оверлей в
+                # кадре, чем мёртвый цвет: он занимает часть площади, и при
+                # K-means кластеру нужно больше 4%, чтобы вообще выиграть.
+                raw = qimage_to_sample(img, (rx, ry, rw, rh))
+                if raw is None or float(raw.max()) <= 0.01:
+                    self._stat["masked"] += 1
+                    return
+                arr = raw
+                self._stat["fallback"] = self._stat.get("fallback", 0) + 1
+            else:
+                self._stat["ok"] += 1
+        else:
+            self._stat["ok"] += 1
+        self.sc.feed_frame(arr)
+        # последний сэмпл держим для разбора: из другого процесса экран
+        # не снять (grabWindow отдаёт чёрный кадр), а посмотреть, что
+        # именно измеряется, нужно
+        self._last_sample = arr.copy()
 
     # Высота фигур, доля высоты экрана при height_scale = 1. Один источник
     # правды для отрисовки и для маски exclude_viz: раньше маска считалась
@@ -598,6 +804,40 @@ class Overlay(QWidget):
         # общий ореол фигуры у остальных стилей: около 14 пикселей на 1080p
         r_px = max(r_px, 14.0 * sg)
         return (r_px + 4.0) / float(max(1, self.height()))
+
+    def _panel_covers(self, screen):
+        """Мешает ли окно панели замеру цвета.
+
+        По умолчанию НЕ мешает, и это осознанно. Панель почти всегда открыта
+        в браузере во весь экран — но тогда на экране нет ничего, кроме неё,
+        и она сама является тем контентом, цвет которого пользователь хочет
+        видеть. Раньше здесь стояло «мешает», и выходило так: пользователь
+        открывает панель, чтобы посмотреть настройки, — цвет замирает
+        наглухо. Перезагрузка и переподъём не помогали, потому что причина
+        была не в зависании.
+
+        Галка panel_blocks возвращает старое поведение — для тех случаев,
+        когда панель развёрнута и мерять её цвет действительно не нужно.
+
+        Доля и передний план по-прежнему считаются: они показываются в
+        панели, чтобы было видно, что приложение вообще видит окно.
+        """
+        pg = getattr(self, "_panel_geom", None)
+        self._panel_cover = 0.0
+        if pg is None or screen is None:
+            return False
+        sg = screen.geometry()
+        if sg.width() <= 0 or sg.height() <= 0:
+            return False
+        ix0, iy0 = max(pg[0], sg.left()), max(pg[1], sg.top())
+        ix1 = min(pg[0] + pg[2], sg.left() + sg.width())
+        iy1 = min(pg[1] + pg[3], sg.top() + sg.height())
+        if ix1 <= ix0 or iy1 <= iy0:
+            return False
+        self._panel_cover = (ix1 - ix0) * (iy1 - iy0) / float(sg.width() * sg.height())
+        if not self._cfg().get("panel_blocks", False):
+            return False
+        return bool(getattr(self, "_panel_on_top", False)) and self._panel_cover > 0.6
 
     def _extent(self, cfg, style=None):
         """Габариты фигуры в долях экрана: (x0, x1, top, bot).
@@ -701,21 +941,30 @@ class Overlay(QWidget):
             zbot = min(1.05, zbot + 0.02)
             qx0, qx1 = _mx(zx0, zx1)
             qy0, qy1 = _my(ztop, zbot)
+            # Маска не должна съедать кадр. Запас на свечение считается в
+            # пикселях и при широком ореоле (свечение искр до 3.0) раздувает
+            # окно на всю высоту кадра: вырезается ровно всё, замер падает, и
+            # цвет замирает. Поэтому окно ужимается до не более 45% площади —
+            # этого хватает, чтобы убрать саму фигуру, и оставляет сигнал.
+            fxs = qx1 - qx0
+            fys = qy1 - qy0
+            if fxs * fys > 0.45:
+                k = (0.45 / max(1e-6, fxs * fys)) ** 0.5
+                cx, cy = (qx0 + qx1) * 0.5, (qy0 + qy1) * 0.5
+                qx0, qx1 = cx - fxs * k * 0.5, cx + fxs * k * 0.5
+                qy0, qy1 = cy - fys * k * 0.5, cy + fys * k * 0.5
             arr[(fx >= qx0) & (fx <= qx1) & (fy >= qy0) & (fy <= qy1)] = 0.0
-            # окно панели тоже не голосует (координаты — относительно замеряемого экрана)
-            pg = getattr(self, "_panel_geom", None)
-            if pg is not None and scr_geo is not None and scr_geo.width() > 0 and scr_geo.height() > 0:
-                ix0, iy0 = max(pg[0], scr_geo.left()), max(pg[1], scr_geo.top())
-                ix1 = min(pg[0] + pg[2], scr_geo.left() + scr_geo.width())
-                iy1 = min(pg[1] + pg[3], scr_geo.top() + scr_geo.height())
-                if ix1 > ix0 and iy1 > iy0:
-                    px0, px1 = (ix0 - scr_geo.left()) / scr_geo.width(), (ix1 - scr_geo.left()) / scr_geo.width()
-                    py0, py1 = (iy0 - scr_geo.top()) / scr_geo.height(), (iy1 - scr_geo.top()) / scr_geo.height()
-                    qx0, qx1 = _mx(px0, px1)
-                    qy0, qy1 = _my(py0, py1)
-                    arr[(fx >= qx0) & (fx <= qx1) & (fy >= qy0) & (fy <= qy1)] = 0.0
+            # Окно панели НЕ вырезается. Пользователь попросил прямо: из
+            # кадра режется только сам оверлей, больше ничего. Когда панель
+            # развёрнута во весь экран, на экране нет ничего, кроме неё, —
+            # значит она и есть тот контент, цвет которого нужен. Вырезать
+            # её было значило бы оставлять кадр пустым и не мерять вовсе.
         except Exception:
-            pass
+            # Раньше тут был голый pass: если расчёт габаритов падал, маска
+            # просто не вырезалась, и об этом не узнавал никто. Теперь считаем
+            # и пишем в лог — иначе поведение цвета выглядит «непонятным».
+            self._stat["mask_err"] = self._stat.get("mask_err", 0) + 1
+            log.exception("вырезание оверлея из кадра не удалось")
 
     def update_sysfx(self, S, has_sig, demo):
         """SYS-приближение/тряска всего экрана через Magnification API.
@@ -796,6 +1045,12 @@ class Overlay(QWidget):
         # таймера или потерянного окна. Без неё «зависший» оверлей неотличим
         # от работающего, пока смотришь на картинку.
         self._last_tick = time.monotonic()
+        self._fps_n += 1
+        now = self._last_tick
+        if now - self._fps_at >= 1.0:
+            self._fps_real = self._fps_n / float(now - self._fps_at)
+            self._fps_n = 0
+            self._fps_at = now
         S = self._cfg()
         if S.get("bars", 64) != self._last_bars:
             self.disp = np.zeros(S["bars"], dtype=np.float32)
@@ -1349,23 +1604,51 @@ class Overlay(QWidget):
         откатываются в палитру, иначе фигуры погасли бы в чёрный."""
         mode = S.get("shape_color", "screen")
         if mode == "palette" or not S.get("follow_screen", True):
+            self._apply_dark(self.palette, None, S, "palette")
             return "palette", None
         r, g, b = self._rgb(S)
-        return ("solid", (r, g, b)) if mode == "screen" else ("tint", (r, g, b))
+        m = "solid" if mode == "screen" else "tint"
+        self._apply_dark(self.palette, (r, g, b), S, m)
+        return (m, (r, g, b))
+
+    def _apply_dark(self, pal, cc, S, mode):
+        """Посчитать поднятые цвета фигуры один раз на кадр.
+
+        Раньше ограничение темноты жило только в коде искр, и остальные
+        пятнадцать фигур его не видели. Теперь поднимается вся палитра целиком,
+        один раз за кадр: для каждой фигуры поштучно считать было бы пять
+        сотен вычислений вместо одного вектора, а искры — отдельная копия
+        этого же кода, которая со временем разъехалась бы с общей.
+        """
+        try:
+            dark = float(np.clip(S.get("color_dark", 0.25), 0.0, 1.0))
+        except (TypeError, ValueError):
+            dark = 0.25
+        n = len(pal) or 1
+        if cc is not None and mode == "solid":
+            base = np.tile(np.asarray(cc, dtype=np.float32), (n, 1))
+        else:
+            base = np.asarray(pal[:n], dtype=np.float32).reshape(n, 3)
+            if cc is not None and mode == "tint":
+                base = base * 0.4 + np.asarray(cc, dtype=np.float32) * 0.6
+        self._base = lift_rgb(base, dark)
 
     def _shape_rgb(self, i):
-        """Базовый цвет элемента i, без учёта его громкости."""
-        mode = getattr(self, "_cm", "palette")
-        cc = getattr(self, "_cc", None)
-        if cc is not None and mode == "solid":
-            return cc
-        pal = self.palette
-        if not len(pal):
-            return cc if cc else (255, 255, 255)
-        r, g, b = pal[i] if i < len(pal) else pal[-1]
-        if cc is not None and mode == "tint":
-            r, g, b = r * 0.4 + cc[0] * 0.6, g * 0.4 + cc[1] * 0.6, b * 0.4 + cc[2] * 0.6
-        return r, g, b
+        """Базовый цвет элемента i, без учёта его громкости.
+
+        Берём из self._base — палитру, уже поднятую ограничением темноты в
+        _shape_colors. Отдельный режим «solid» не нужен: там все элементы
+        одного цвета, и в _base он и так размножен на все строки.
+        """
+        base = getattr(self, "_base", None)
+        if base is None or not len(base):
+            pal = self.palette
+            if not len(pal):
+                return (255, 255, 255)
+            r, g, b = pal[i] if i < len(pal) else pal[-1]
+            return float(r), float(g), float(b)
+        row = base[i] if i < len(base) else base[-1]
+        return float(row[0]), float(row[1]), float(row[2])
 
     def _bar_color(self, i, v, alpha):
         """Цвет элемента фигуры: базовый цвет по режиму, затем яркость от
@@ -1376,84 +1659,6 @@ class Overlay(QWidget):
         boost = 0.55 + min(1.0, float(v)) * 0.7
         return QColor(min(255, int(r * boost)), min(255, int(g * boost)),
                       min(255, int(b * boost)), alpha)
-
-    # ---------- ограничение темноты для искр ----------
-    @staticmethod
-    def _lift_rgb(base, dark):
-        """Поднять цвета: пол по яркости и насыщенность. `dark` 0..1.
-
-        Искры берут цвет из замера экрана, а тёмный экран даёт тёмные искры —
-        на тёмном видео они почти гасли. Здесь два шага:
-
-        - пол по самому яркому каналу: если он ниже порога, все каналы
-          домножаются так, чтобы порог был достигнут;
-        - насыщенность: цвет смещается к «полностью насыщенному» варианту с
-          тем же самым ярким каналом.
-
-        Насыщенность считается именно так, а не вычитанием минимума: при
-        вычитании серый (250,250,250) превращался в чёрный, потому что у
-        серого все каналы равны и минимум равен максимуму. Здесь серый
-        остаётся серым — насыщать нечего.
-
-        dark = 1 — не трогать совсем, dark = 0 — максимум яркости и чистоты.
-        """
-        dark = float(dark)
-        a = np.asarray(base, dtype=np.float32).reshape(-1, 3)
-        if dark >= 0.999:
-            return np.clip(a, 0.0, 255.0)
-        keep = 1.0 - dark
-        # --- пол по яркости ---
-        # Порог 210, а не 255: серый с экрана, дотянутый до 255, стал бы
-        # чисто белым и потерял характер. 210 — светло, но ещё цвет.
-        floor = 210.0 * keep
-        mx_raw = a.max(axis=1, keepdims=True)
-        mx = np.maximum(mx_raw, 1.0)
-        a = a * (1.0 + np.maximum(0.0, floor - mx) / mx)
-        # Совсем чёрный цвет домножить нечем: 0 * что угодно = 0, и искры
-        # остались бы чёрными при темноте 0. Такое бывает, когда в зоне
-        # замера кадр чёрный, и подставляем порог.
-        a = np.where(mx_raw < 1.0, floor, a)
-        # --- насыщенность, с сохранением яркого канала ---
-        mx = np.maximum(a.max(axis=1, keepdims=True), 1.0)
-        norm = a / mx
-        lo = norm.min(axis=1, keepdims=True)
-        span = 1.0 - lo
-        safe = span > 1e-3
-        full = np.where(safe, (norm - lo) / np.where(safe, span, 1.0), norm)
-        a = a + (full * mx - a) * keep
-        return np.clip(a, 0.0, 255.0)
-
-    def _spark_base(self, S):
-        """Базовые цвета искр с ограничением темноты, один раз на кадр.
-
-        Тот же режим цвета, что у остальных фигур (_shape_rgb), но целиком и
-        через numpy. Поштучно в цикле над 500 частицами это было бы пять
-        сотен вычислений на кадр вместо одного вектора.
-        """
-        mode = getattr(self, "_cm", "palette")
-        cc = getattr(self, "_cc", None)
-        pal = self.palette
-        n = len(pal) or 1
-        try:
-            dark = float(np.clip(S.get("spark_dark", 0.25), 0.0, 1.0))
-        except (TypeError, ValueError):
-            dark = 0.25
-        if cc is not None and mode == "solid":
-            base = np.tile(np.asarray(cc, dtype=np.float32), (n, 1))
-        else:
-            base = np.asarray(pal[:n], dtype=np.float32).reshape(n, 3)
-            if cc is not None and mode == "tint":
-                base = base * 0.4 + np.asarray(cc, dtype=np.float32) * 0.6
-        return self._lift_rgb(base, dark)
-
-    @staticmethod
-    def _spark_color(base, i, v, alpha):
-        """Цвет искры по поднятой базе. Тот же boost, что у остальных фигур."""
-        row = base[i] if i < len(base) else base[-1]
-        boost = 0.55 + min(1.0, float(v)) * 0.7
-        return QColor(min(255, int(float(row[0]) * boost)),
-                      min(255, int(float(row[1]) * boost)),
-                      min(255, int(float(row[2]) * boost)), alpha)
 
     def _bar_heights(self, S, n, H):
         """Высоты столбиков со сглаживанием и пульсом — как у волны.
@@ -2139,8 +2344,6 @@ class Overlay(QWidget):
         xs = st["x"][:cap][alive]
         ys = st["y"][:cap][alive]
         bins = st["bin"][:cap][alive]
-        # Цвета считаем один раз на кадр, а не по пятьсот раз в цикле
-        base = self._spark_base(S)
         # Широкие ореолы — без сглаживания. Они огромные и мягкие, ступеньки
         # на них не видны, а сглаживание на 1536 окружностях стоит треть
         # времени кадра. Сама искра рисуется с ним.
@@ -2155,7 +2358,7 @@ class Overlay(QWidget):
             rad_i = float(rad[i])
             x = float(xs[i])
             y = float(ys[i])
-            c = self._spark_color(base, int(bins[i]), float(lvl[i]), 255)
+            c = self._bar_color(int(bins[i]), float(lvl[i]), 255)
             base_a = float(a0[i])
             for k, wa in passes[:-1]:
                 r = rad_i * (1.0 + (k - 1.0) * glow * gw_i)
@@ -2174,7 +2377,7 @@ class Overlay(QWidget):
             rad_i = float(rad[i])
             if rad_i < 0.7:
                 continue
-            c = self._spark_color(base, int(bins[i]), float(lvl[i]), 255)
+            c = self._bar_color(int(bins[i]), float(lvl[i]), 255)
             # Ядро гасится окном так же, как ореол: в исходном варианте оно
             # тоже шло с множителем gw, и менять это незаметно не выйдет —
             # все настройки подобраны под прежнюю картинку.
