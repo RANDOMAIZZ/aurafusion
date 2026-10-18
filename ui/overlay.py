@@ -248,7 +248,7 @@ def per_style_keys(style):
     if style == "sparks":
         # скорость, разгон и плотность — только у искр, у остальных фигур их нет
         keys |= {"spark_speed", "spark_boost", "spark_density", "spark_glow",
-                "spark_glow_start", "spark_glow_end"}
+                "spark_glow_start", "spark_glow_end", "spark_dark"}
     if style in BASE_STYLES:
         keys |= {"viz_x", "viz_y", "viz_w"}
     if style in CENTER_STYLES:
@@ -1328,6 +1328,84 @@ class Overlay(QWidget):
         return QColor(min(255, int(r * boost)), min(255, int(g * boost)),
                       min(255, int(b * boost)), alpha)
 
+    # ---------- ограничение темноты для искр ----------
+    @staticmethod
+    def _lift_rgb(base, dark):
+        """Поднять цвета: пол по яркости и насыщенность. `dark` 0..1.
+
+        Искры берут цвет из замера экрана, а тёмный экран даёт тёмные искры —
+        на тёмном видео они почти гасли. Здесь два шага:
+
+        - пол по самому яркому каналу: если он ниже порога, все каналы
+          домножаются так, чтобы порог был достигнут;
+        - насыщенность: цвет смещается к «полностью насыщенному» варианту с
+          тем же самым ярким каналом.
+
+        Насыщенность считается именно так, а не вычитанием минимума: при
+        вычитании серый (250,250,250) превращался в чёрный, потому что у
+        серого все каналы равны и минимум равен максимуму. Здесь серый
+        остаётся серым — насыщать нечего.
+
+        dark = 1 — не трогать совсем, dark = 0 — максимум яркости и чистоты.
+        """
+        dark = float(dark)
+        a = np.asarray(base, dtype=np.float32).reshape(-1, 3)
+        if dark >= 0.999:
+            return np.clip(a, 0.0, 255.0)
+        keep = 1.0 - dark
+        # --- пол по яркости ---
+        # Порог 210, а не 255: серый с экрана, дотянутый до 255, стал бы
+        # чисто белым и потерял характер. 210 — светло, но ещё цвет.
+        floor = 210.0 * keep
+        mx_raw = a.max(axis=1, keepdims=True)
+        mx = np.maximum(mx_raw, 1.0)
+        a = a * (1.0 + np.maximum(0.0, floor - mx) / mx)
+        # Совсем чёрный цвет домножить нечем: 0 * что угодно = 0, и искры
+        # остались бы чёрными при темноте 0. Такое бывает, когда в зоне
+        # замера кадр чёрный, и подставляем порог.
+        a = np.where(mx_raw < 1.0, floor, a)
+        # --- насыщенность, с сохранением яркого канала ---
+        mx = np.maximum(a.max(axis=1, keepdims=True), 1.0)
+        norm = a / mx
+        lo = norm.min(axis=1, keepdims=True)
+        span = 1.0 - lo
+        safe = span > 1e-3
+        full = np.where(safe, (norm - lo) / np.where(safe, span, 1.0), norm)
+        a = a + (full * mx - a) * keep
+        return np.clip(a, 0.0, 255.0)
+
+    def _spark_base(self, S):
+        """Базовые цвета искр с ограничением темноты, один раз на кадр.
+
+        Тот же режим цвета, что у остальных фигур (_shape_rgb), но целиком и
+        через numpy. Поштучно в цикле над 500 частицами это было бы пять
+        сотен вычислений на кадр вместо одного вектора.
+        """
+        mode = getattr(self, "_cm", "palette")
+        cc = getattr(self, "_cc", None)
+        pal = self.palette
+        n = len(pal) or 1
+        try:
+            dark = float(np.clip(S.get("spark_dark", 0.25), 0.0, 1.0))
+        except (TypeError, ValueError):
+            dark = 0.25
+        if cc is not None and mode == "solid":
+            base = np.tile(np.asarray(cc, dtype=np.float32), (n, 1))
+        else:
+            base = np.asarray(pal[:n], dtype=np.float32).reshape(n, 3)
+            if cc is not None and mode == "tint":
+                base = base * 0.4 + np.asarray(cc, dtype=np.float32) * 0.6
+        return self._lift_rgb(base, dark)
+
+    @staticmethod
+    def _spark_color(base, i, v, alpha):
+        """Цвет искры по поднятой базе. Тот же boost, что у остальных фигур."""
+        row = base[i] if i < len(base) else base[-1]
+        boost = 0.55 + min(1.0, float(v)) * 0.7
+        return QColor(min(255, int(float(row[0]) * boost)),
+                      min(255, int(float(row[1]) * boost)),
+                      min(255, int(float(row[2]) * boost)), alpha)
+
     def _bar_heights(self, S, n, H):
         """Высоты столбиков со сглаживанием и пульсом — как у волны.
         Раньше бары шли сырым спектром без сглаживания и без пульса, из-за
@@ -2012,6 +2090,8 @@ class Overlay(QWidget):
         xs = st["x"][:cap][alive]
         ys = st["y"][:cap][alive]
         bins = st["bin"][:cap][alive]
+        # Цвета считаем один раз на кадр, а не по пятьсот раз в цикле
+        base = self._spark_base(S)
         # Широкие ореолы — без сглаживания. Они огромные и мягкие, ступеньки
         # на них не видны, а сглаживание на 1536 окружностях стоит треть
         # времени кадра. Сама искра рисуется с ним.
@@ -2026,7 +2106,7 @@ class Overlay(QWidget):
             rad_i = float(rad[i])
             x = float(xs[i])
             y = float(ys[i])
-            c = self._bar_color(int(bins[i]), float(lvl[i]), 255)
+            c = self._spark_color(base, int(bins[i]), float(lvl[i]), 255)
             base_a = float(a0[i])
             for k, wa in passes[:-1]:
                 r = rad_i * (1.0 + (k - 1.0) * glow * gw_i)
@@ -2045,7 +2125,7 @@ class Overlay(QWidget):
             rad_i = float(rad[i])
             if rad_i < 0.7:
                 continue
-            c = self._bar_color(int(bins[i]), float(lvl[i]), 255)
+            c = self._spark_color(base, int(bins[i]), float(lvl[i]), 255)
             # Ядро гасится окном так же, как ореол: в исходном варианте оно
             # тоже шло с множителем gw, и менять это незаметно не выйдет —
             # все настройки подобраны под прежнюю картинку.

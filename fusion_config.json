@@ -13,7 +13,7 @@
     0,
     0
   ],
-  "alpha": 245,
+  "alpha": 255,
   "fill_color": [
     255,
     0,
@@ -166,11 +166,11 @@
       "line_smooth": 1,
       "viz_y": 1,
       "viz_w": 1,
-      "spark_speed": 0.18,
+      "spark_speed": 0.4,
       "spark_boost": 6,
       "spark_density": 4,
-      "spark_glow": 2.43,
-      "spark_glow_start": 0,
+      "spark_glow": 3,
+      "spark_glow_start": 1,
       "spark_glow_end": 0
     }
   },
@@ -276,7 +276,7 @@
   "ble_enabled": true,
   "ble_scan_s": 8,
   "ble_max_fps": 20,
-  "web_theme": "amethyst",
+  "web_theme": "ember",
   "autostart": true,
   "autosave": true,
   "openrgb_host": "127.0.0.1",
