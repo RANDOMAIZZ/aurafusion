@@ -286,15 +286,29 @@ class SharedAudio(threading.Thread):
                     x, cfg2.get("sensitivity", 1.4),
                     cfg2.get("bass_gain", 1.0), cfg2.get("mid_gain", 1.25),
                     cfg2.get("treble_gain", 1.7))
-                silent = float(np.abs(x).mean()) <= float(cfg2.get("silence_thr", 0.002))
+                # Тишина определялась по мгновенному среднему одного блока:
+                # на любой паузе между нотами или в начале трека has_signal
+                # на кадр обнулялся, и при auto_hide волна гасла и вспыхала
+                # снова. Теперь порог двусторонний — уже набранный сигнал
+                # держится, пока реально не стихнет.
+                thr = float(cfg2.get("silence_thr", 0.002))
+                lvl_abs = float(np.abs(x).mean())
                 with self.lock:
-                    n = min(len(spec), len(self.spec))
-                    self.spec[:n] = spec[:n]
+                    was = self.has_signal
+                    if was:
+                        self.has_signal = lvl_abs > thr * 0.5   # отпускаем позже
+                    else:
+                        self.has_signal = lvl_abs > thr * 1.5   # берём позже
+                    if self.has_signal:
+                        n = min(len(spec), len(self.spec))
+                        self.spec[:n] = spec[:n]
+                    else:
+                        # в тишине спектр плавно гаснет, а не обрывается
+                        self.spec *= 0.9
                     self.wave = (x[::2][:1024].copy() if len(x) >= 64
                                  else np.zeros(1024, dtype=np.float32))
                     self.level = lvl
                     self.bass = bass * boost
-                    self.has_signal = not silent
         finally:
             try:
                 if stream is not None:

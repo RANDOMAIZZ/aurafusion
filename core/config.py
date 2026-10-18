@@ -15,16 +15,23 @@ DEFAULTS = {
     "max_level": 1.0,
     "height_scale": 0.55,
     "color_mode": "neon",       # neon | green | fire | white | custom
+    "shape_color": "screen",   # цвет фигур (бары/круг/…): screen|tint|palette
     "custom_color": [0, 220, 255],
     "alpha": 230,
     "fill_color": [0, 200, 255],
     "fill_alpha": 90,
     "line_width": 3,
     "line_style": "thin",       # neon|thin|fat|double|dash|gradient|dotted|outline|steps|megaglow
-    "wave_smooth": 0.65,
     "wave_ceiling": 1.0,
     "mirror": False,
     "viz_x": 0.5, "viz_y": 0.93, "viz_w": 0.92,
+    "fig_x": 0.5, "fig_y": 0.5, "fig_size": 1.0,   # положение и размер центральных фигур
+    "style_settings": {},      # свои значения настроек для каждой фигуры: {стиль: {ключ: значение}}
+    "line_count": 64,           # сколько линий/столбиков/спиц рисует фигура
+    "line_smooth": 0.45,        # плавность линий 0..1
+    "spark_speed": 1.0,         # базовая скорость подъёма искр
+    "spark_boost": 1.0,         # насколько скорость растёт на громкой частоте
+    "spark_density": 1.0,       # плотность искр, 1.0 — умеренно
     "beat_pulse": True, "beat_strength": 0.35,
     "overlay_opacity": 1.0,
     "bass_gain": 1.0, "mid_gain": 1.25, "treble_gain": 1.7,
@@ -44,6 +51,9 @@ DEFAULTS = {
     "color_region": "full",     # full | center | top | bottom | custom
     "color_rx": 0.0, "color_ry": 0.0, "color_rw": 1.0, "color_rh": 1.0,  # своя область (доли экрана)
     "click_through": True, "always_on_top": True,
+    # Оверлей не залезает на панель задач. Иначе на автоскрытии она выезжает
+    # под оверлей и кажется, что не поднялась.
+    "avoid_taskbar": True,
     # --- цвет с экрана (общий для оверлея и ПК) ---
     "follow_screen": True,      # главный тумблер Ambilight
     "exclude_viz": True,        # не учитывать волну и панель при замере цвета
@@ -87,6 +97,38 @@ DEFAULTS = {
 }
 
 
+# Ключи, которые обязаны быть числами. Панель местами писала их строками
+# («60» вместо 60), и код, делящий на них, падал с TypeError — приложение
+# не стартовало. Приводим тип при загрузке, чтобы правка в конфиге или в
+# веб-интерфейсе не могла сломать запуск.
+INT_KEYS = {
+    "overlay_fps", "rgb_fps", "bars", "line_width", "alpha", "fill_alpha", "line_count",
+    "chunk", "monitor", "color_monitor", "idle_fps",
+    "ble_max_fps", "color_hold", "dark_threshold", "reassert_min",
+}
+
+# Дробные ключи. Их нельзя класть в INT_KEYS: int() от 0.35 даёт 0, и
+# значение, выставленное в панели, молча превращалось в ноль при каждой
+# загрузке. Так пропадали обе границы яркости подсветки: «мин. яркость»
+# крутится в диапазоне 0..0.50, а «макс. яркость» шлёт 0.20..1.00, но обе
+# стояли в списке целых рядом с прочими числами — и всегда грузились нулём,
+# то есть подсветка работала только на «полную», а ползунки были бесполезны.
+FLOAT_KEYS = {
+    "min_brightness": (0.0, 1.0),
+    "max_brightness": (0.0, 1.0),
+    "gamma": (0.1, 10.0),
+    "pulse_gain": (0.0, 50.0),
+    "avg_s": (0.05, 60.0),
+    "abs_floor": (0.0, 1.0),
+    "pulse_threshold": (-1.0, 5.0),
+}
+
+# Строковые ключи, которые по ошибке тоже попали в INT_KEYS: int(float())
+# на «#C50DF1» падает, обработчик проглатывал исключение и молча возвращал
+# значение по умолчанию — выбранный цвет просто не сохранялся.
+STR_KEYS = {"static_color"}
+
+
 def load():
     cfg = dict(DEFAULTS)
     try:
@@ -99,8 +141,29 @@ def load():
             # devices отдельно (вложенный dict)
             if isinstance(data.get("devices"), dict):
                 cfg["devices"] = data["devices"]
+            # style_settings — вложенный dict, а в DEFAULTS он пустой,
+            # поэтому обычный фильтр по ключам его бы отбросил
+            if isinstance(data.get("style_settings"), dict):
+                cfg["style_settings"] = data["style_settings"]
     except Exception as e:
         print(f"[config] load warn: {e}")
+    for k in INT_KEYS:
+        try:
+            if isinstance(cfg.get(k), bool):
+                continue
+            cfg[k] = int(float(cfg[k]))
+        except (TypeError, ValueError):
+            cfg[k] = DEFAULTS.get(k)
+    for k, (lo, hi) in FLOAT_KEYS.items():
+        try:
+            if isinstance(cfg.get(k), bool):
+                continue
+            cfg[k] = float(min(hi, max(lo, float(cfg[k]))))
+        except (TypeError, ValueError):
+            cfg[k] = DEFAULTS.get(k)
+    for k in STR_KEYS:
+        if not isinstance(cfg.get(k), str) or not cfg[k]:
+            cfg[k] = DEFAULTS.get(k)
     return cfg
 
 

@@ -17,6 +17,7 @@ const el = (tag, cls, txt) => {
 /* ================= сеть ================= */
 const api = {
   async cfg() { return (await fetch('/api/config')).json(); },
+  async styles() { return (await fetch('/api/styles')).json(); },
   async state() { return (await fetch('/api/state')).json(); },
   async audio() { return (await fetch('/api/audio')).json(); },
   async monitors() { return (await fetch('/api/monitors')).json(); },
@@ -73,7 +74,7 @@ function mkSlider(c) {
   };
   const push = () => {
     const patch = { [c.key]: c.int ? Math.round(s.value / div) : s.value / div };
-    if (c.onchange) c.onchange(s.value / div, s); else api.set(patch);
+    if (c.onchange) c.onchange(s.value / div, s); else put(patch);
   };
   s.addEventListener('input', () => { paint(+s.value); push(); });
   s.addEventListener('change', () => { paint(+s.value); push(); });
@@ -95,7 +96,7 @@ function mkCheck(c) {
     // нативный клик по скрытому input не сработает — переключаем сами
     e.preventDefault();
     i.checked = !i.checked;
-    if (c.onchange) c.onchange(i.checked); else api.set({ [c.key]: i.checked });
+    if (c.onchange) c.onchange(i.checked); else put({ [c.key]: i.checked });
   });
   w.append(l);
   c.el = i;
@@ -150,8 +151,12 @@ function mkSelect(c) {
         api_el.value = value;
         CFG[c.key] = value;
         closeDD();
+        // Значение уходит на сервер ВСЕГДА, а обработчик — это уведомление
+        // после сохранения, а не его замена. Раньше ветка с onchange
+        // пропускала put(), и выбор стиля менялся только в памяти браузера:
+        // сервер о нём не узнавал, оверлей рисовал прежнюю фигуру.
+        put({ [c.key]: c.isInt ? parseInt(value, 10) : value });
         if (c.onchange) c.onchange(value, api_el);
-        else api.set({ [c.key]: c.isInt ? parseInt(value, 10) : value });
       });
       list.append(it);
     }
@@ -271,11 +276,100 @@ function onCmode(v) {
   inp.click();
 }
 function onAudio(v) { api.set({ audio_device: v }); }
+function onStyle(v) {
+  // значение уже ушло на сервер обработчиком списка; здесь только
+  // подставляем значения этой фигуры и прячем неуместные настройки
+  seedStyle(v);
+  fillValues('viz');
+  fillValues('snd');
+  fillValues('sys');
+  fillValues('amb');
+  applyStyleProfile();
+}
 function onColorMon(v) { api.set({ color_monitor: parseInt(v, 10) || -1 }); }
 function onOvMon(v) { api.set({ monitor: parseInt(v, 10) || 0 }); }
 function onSysCheck(k, v) {
   api.set({ [k]: !!v });
   if (k === 'autostart') api.act('autostart', { value: !!v });
+}
+
+/* ================= настройки по стилям =================
+   У каждой фигуры свой набор настроек: кругу не нужна ширина по краям
+   экрана, волне — центр на экране. Панель спрашивает у сервера, какие
+   ключи уместны для каждой фигуры (ui.overlay.style_keys), прячет
+   неуместные, а значения помнит отдельно для каждой фигуры, чтобы
+   переключение туда-обратно ничего не затирало. */
+let STYLE_KEYS = {};       // стиль -> Set: что показывать
+let STYLE_OWN = {};        // стиль -> Set: что писать в личный список
+let STYLE_LIST = [];       // [[ключ, подпись], ...]
+
+function scopedKeys() {
+  const k = STYLE_KEYS[CFG.style];
+  return k ? new Set(k) : null;
+}
+function ownKeys() {
+  const k = STYLE_OWN[CFG.style];
+  return k ? new Set(k) : null;
+}
+
+/** Кладёт значения в общий конфиг, а настройки, которые у фигуры свои,
+    ещё и в её личный список — иначе фигуры затирали бы друг друга.
+    Общие настройки (звук, RGB, система) сюда не попадают намеренно. */
+function withPerStyle(patch) {
+  const own = ownKeys();
+  if (!own) return patch;
+  let hit = false;
+  for (const k of Object.keys(patch)) if (own.has(k)) { hit = true; break; }
+  if (!hit) return patch;
+  const st = CFG.style || 'smooth';
+  const map = Object.assign({}, CFG.style_settings || {});
+  map[st] = Object.assign({}, map[st]);
+  const rest = {};
+  for (const k of Object.keys(patch)) {
+    if (own.has(k)) map[st][k] = patch[k];
+    else rest[k] = patch[k];   // общие настройки идут в общий конфиг как есть
+  }
+  CFG.style_settings = map;
+  rest.style_settings = map;
+  return rest;
+}
+
+function put(patch) { api.set(withPerStyle(patch)); }
+
+/** Запоминает текущие значения под новую фигуру при первом переходе на неё,
+    иначе фигура начинала бы с чужих чисел и всё бы сдвинулось. */
+function seedStyle(st) {
+  const own = new Set(STYLE_OWN[st] || []);
+  const map = Object.assign({}, CFG.style_settings || {});
+  if (map[st]) return;
+  const seed = {};
+  for (const k of own) if (Object.prototype.hasOwnProperty.call(CFG, k)) seed[k] = CFG[k];
+  map[st] = seed;
+  CFG.style_settings = map;
+  put({ style_settings: map });
+}
+
+/** Прячет ползунки и галочки, неуместные для выбранной фигуры,
+    и прячет всю секцию, если в ней не осталось ничего живого. */
+function applyStyleProfile() {
+  const scope = scopedKeys();
+  if (!scope) return;
+  // Только страница «Визуал». Остальные страницы — это RGB, Ambilight, звук
+  // и система: их ключи не входят в профиль фигуры, и раньше проверка
+  // прятала их целиком.
+  for (const sec of PAGES.viz) {
+    let live = 0;
+    for (const c of sec.items || []) {
+      const node = c._node;
+      if (!node) continue;
+      // без ключа (кнопки, подсказки, списки устройств) показываем всегда
+      const show = !c.key || scope.has(c.key);
+      node.style.display = show ? '' : 'none';
+      if (show) live++;
+    }
+    // секция целиком неуместна — прячем и её
+    if (sec._grid) sec._grid.parentElement.style.display = live ? '' : 'none';
+  }
 }
 
 /* ================= страницы ================= */
@@ -527,31 +621,59 @@ function mkCatalog() {
 
 const PAGES = {
   viz: [
-    { g: 'Стиль волны', desc: 'Как выглядит волна поверх окон и игр.', items: [
-      { t: 'select', key: 'style', label: 'Стиль', options: [
-        ['Плавная волна', 'smooth'], ['Бары', 'bars'], ['Круг', 'circle'], ['Бары+волна', 'combo']] },
+    { g: 'Фигура', desc: 'Что именно рисуем и каким цветом. Остальные секции показывают только настройки выбранной фигуры — лишние прячутся сами.', items: [
+      { t: 'select', key: 'style', label: 'Стиль', onchange: onStyle, options: [
+        ['Плавная волна', 'smooth'], ['Бары', 'bars'], ['Пики', 'peak'],
+        ['Частицы', 'particles'], ['Искры', 'sparks'], ['Шарики', 'orbs'], ['Сетка', 'mesh'],
+        ['Слои', 'stack'], ['Заливка', 'fill'], ['Лента', 'ribbon'],
+        ['Круг', 'circle'], ['Дуга', 'arc'], ['Спираль', 'spiral'],
+        ['Кольца', 'radial'], ['Лучи', 'rays'], ['Бары+волна', 'combo']] },
+      { t: 'select', key: 'shape_color', label: 'Цвет фигур', desc: 'Бары, круг и прочие фигуры. Пока «Экран → ПК» выключен, берётся палитра.', options: [
+        ['Как на экране', 'screen'], ['Палитра, подкрашенная экраном', 'tint'],
+        ['Своя палитра', 'palette'] ] },
+      { t: 'select', key: 'color_mode', label: 'Палитра', onchange: onCmode, options: [
+        ['Неон', 'neon'], ['Зелёный', 'green'], ['Огонь', 'fire'], ['Белый', 'white'], ['Свой...', 'custom']] },
+      { t: 'color', key: 'fill_color', label: 'Цвет волны (если экран выкл)', array: true },
+    ]},
+    { g: 'Размер и положение', desc: 'Где стоит фигура и какого размера. У фигур на базовой линии — своя полоса по низу экрана, у круглых — центр и радиус.', items: [
+      { t: 'slider', key: 'line_count', label: 'Количество линий', min: 8, max: 256, int: true, desc: 'Столбики у баров, спицы у круга, витки у спирали.' },
+      { t: 'slider', key: 'line_smooth', label: 'Плавность линий', min: 0, max: 100, div: 100, desc: '0 — линии ровные и отчётливые, 100 — сливаются в сплошную форму.' },
+      // Показываются только у искр: сервер отдаёт ключи в профиле фигуры
+      // (per_style_keys в ui/overlay.py), панель прячет лишнее сама.
+      { t: 'slider', key: 'spark_speed', label: 'Скорость искр', min: 5, max: 400, div: 100, desc: 'Базовая скорость подъёма. Пока играет музыка, искры идут по всей площади вот с этой скоростью.' },
+      { t: 'slider', key: 'spark_boost', label: 'Разгон на частоте', min: 0, max: 600, div: 100, desc: 'Насколько разгоняются искры там, где поднимается своя частота. 0 — все летят одинаково, 2 — сильный выстрел на пике.' },
+      { t: 'slider', key: 'spark_density', label: 'Плотность искр', min: 15, max: 400, div: 100, desc: 'Сколько частиц одновременно в воздухе. Меньше — редкие брызги, больше — плотная завеса.' },
+      { t: 'slider', key: 'height_scale', label: 'Размер / высота', min: 1, max: 200, div: 100 },
+      { t: 'slider', key: 'fig_size', label: 'Размер фигуры', min: 20, max: 250, div: 100 },
+      { t: 'slider', key: 'viz_w', label: 'Ширина', min: 20, max: 100, div: 100 },
+      { t: 'slider', key: 'viz_x', label: 'X — по горизонтали', min: 0, max: 100, div: 100 },
+      { t: 'slider', key: 'viz_y', label: 'Y — по вертикали (низ экрана)', min: 2, max: 100, div: 100 },
+      { t: 'slider', key: 'fig_x', label: 'X — центр круглой фигуры', min: 0, max: 100, div: 100 },
+      { t: 'slider', key: 'fig_y', label: 'Y — центр круглой фигуры', min: 5, max: 95, div: 100 },
+    ]},
+    { g: 'Вид и прозрачность', desc: 'Яркость, заливка и сглаживание.', items: [
       { t: 'select', key: 'line_style', label: 'Линия', options: [
         ['Неон', 'neon'], ['Тонкая', 'thin'], ['Жирная', 'fat'], ['Двойная', 'double'],
         ['Пунктир', 'dash'], ['Градиент', 'gradient'], ['Точки', 'dotted'], ['Контур', 'outline'],
         ['Ступени', 'steps'], ['Яркое ядро', 'megaglow']] },
-      { t: 'select', key: 'color_mode', label: 'Цвет баров', onchange: onCmode, options: [
-        ['Неон', 'neon'], ['Зелёный', 'green'], ['Огонь', 'fire'], ['Белый', 'white'], ['Свой...', 'custom']] },
-      { t: 'color', key: 'fill_color', label: 'Цвет волны (если экран выкл)', array: true },
-    ]},
-    { g: 'Движение и вид', desc: 'Геометрия, прозрачность и реакция волны на бас.', items: [
-      { t: 'slider', key: 'height_scale', label: 'Размер / высота', min: 5, max: 200, div: 100 },
-      { t: 'slider', key: 'wave_smooth', label: 'Гладкость волны', min: 0, max: 100, div: 100 },
+      { t: 'slider', key: 'line_width', label: 'Толщина линии', min: 1, max: 12, int: true },
       { t: 'slider', key: 'alpha', label: 'Яркость линии', min: 40, max: 255, int: true },
       { t: 'slider', key: 'fill_alpha', label: 'Заливка (прозрачность)', min: 0, max: 180, int: true },
-      { t: 'slider', key: 'shake', label: 'Тряска в такт', min: 0, max: 100, div: 100 },
-      { t: 'slider', key: 'zoom', label: 'Зум в такт', min: 0, max: 100, div: 100 },
-      { t: 'slider', key: 'flash', label: 'Вспышка в такт', min: 0, max: 100, div: 100 },
-      { t: 'slider', key: 'beat_strength', label: 'Сила пульса', min: 0, max: 100, div: 100 },
+      { t: 'slider', key: 'wave_ceiling', label: 'Потолок амплитуды', min: 10, max: 100, div: 100 },
+      { t: 'check', key: 'mirror', label: 'Зеркало вверх+вниз' },
+    ]},
+    { g: 'Прозрачность и экран', desc: 'Насколько оверлей заметен и что он делает с картинкой под собой.', items: [
+      { t: 'slider', key: 'overlay_opacity', label: 'Прозрачность оверлея', min: 10, max: 100, div: 100 },
       { t: 'slider', key: 'vignette', label: 'Виньетка (0 = выкл)', min: 0, max: 100, div: 100 },
       { t: 'slider', key: 'bg_dim', label: 'Затемнение экрана', min: 0, max: 60, div: 100 },
       { t: 'slider', key: 'dim_pulse', label: 'Затемнение в такт', min: 0, max: 60, div: 100 },
+      { t: 'slider', key: 'flash', label: 'Вспышка в такт', min: 0, max: 100, div: 100 },
+      { t: 'slider', key: 'shake', label: 'Тряска в такт', min: 0, max: 100, div: 100 },
+      { t: 'slider', key: 'zoom', label: 'Зум в такт', min: 0, max: 100, div: 100 },
+    ]},
+    { g: 'Сила реакции', desc: 'Насколько фигура живо реагирует на бас.', items: [
+      { t: 'slider', key: 'beat_strength', label: 'Сила пульса', min: 0, max: 100, div: 100 },
       { t: 'check', key: 'beat_pulse', label: 'Пульс от баса' },
-      { t: 'check', key: 'mirror', label: 'Зеркало вверх+вниз' },
     ]},
     { g: 'SYS — лупа всего экрана', desc: 'Через Magnification API: приближает и трясёт ВЕСЬ экран, а не только оверлей. Не работает в Exclusive Fullscreen. При выключении экран возвращается.', items: [
       { t: 'check', key: 'sys_fx', label: 'Приближение/тряска ВСЕГО экрана' },
@@ -620,11 +742,6 @@ const PAGES = {
       { t: 'select', key: 'color_algo', label: 'Алгоритм цвета', options: [
         ['Сочный (точный оттенок)', 'juicy'], ['Средний (плавный)', 'average'], ['K-means (3 кластера)', 'kmeans']] },
     ]},
-    { g: 'Геометрия волны', desc: 'Где и как широко лежит волна на экране.', items: [
-      { t: 'slider', key: 'viz_x', label: 'X (центр)', min: 0, max: 100, div: 100 },
-      { t: 'slider', key: 'viz_y', label: 'Y (высота)', min: 2, max: 100, div: 100 },
-      { t: 'slider', key: 'viz_w', label: 'Ширина', min: 20, max: 100, div: 100 },
-    ]},
   ],
 
   snd: [
@@ -650,11 +767,10 @@ const PAGES = {
 
   sys: [
     { g: 'Оверлей', desc: 'Производительность и положение волны на рабочем столе.', items: [
-      { t: 'select', key: 'overlay_fps', label: 'FPS оверлея', options: [
+      { t: 'select', key: 'overlay_fps', label: 'FPS оверлея', isInt: true, options: [
         ['30 (эко)', '30'], ['60 (баланс)', '60'], ['120 (плавно)', '120']] },
       { t: 'select', key: 'monitor', label: 'Монитор оверлея', dynamic: 'ovmon',
         onchange: onOvMon, mini: refreshMonitors, options: [] },
-      { t: 'slider', key: 'overlay_opacity', label: 'Прозрачность оверлея', min: 10, max: 100, div: 100 },
       { t: 'slider', key: 'rgb_fps', label: 'FPS подсветки ПК', min: 1, max: 60, int: true },
       { t: 'slider', key: 'startup_delay_s', label: 'Пауза перед автостартом (с)', min: 0, max: 180, int: true },
     ]},
@@ -668,6 +784,7 @@ const PAGES = {
     { g: 'Поведение', desc: 'Не мешать играм и не грузить железо на старте.', items: [
       { t: 'check', key: 'click_through', label: 'Клики сквозь', onchange: v => onSysCheck('click_through', v) },
       { t: 'check', key: 'always_on_top', label: 'Оверлей всегда поверх', onchange: v => onSysCheck('always_on_top', v) },
+      { t: 'check', key: 'avoid_taskbar', label: 'Не залезать на панель задач', onchange: v => onSysCheck('avoid_taskbar', v), desc: 'На автоскрытии панель выезжает под оверлей и кажется, что не поднялась.' },
       { t: 'check', key: 'auto_hide', label: 'Прятать волну в тишине', onchange: v => onSysCheck('auto_hide', v) },
       { t: 'check', key: 'autostart', label: 'Запуск с Windows', onchange: v => onSysCheck('autostart', v) },
       { t: 'check', key: 'autosave', label: 'Автосохранение', onchange: v => onSysCheck('autosave', v) },
@@ -714,6 +831,7 @@ function buildControl(c) {
     return h;
   }
   const node = { select: mkSelect, slider: mkSlider, check: mkCheck, color: mkColor }[c.t](c);
+  c._node = node;
   if (c.id) { CTLS[c.id] = c; node.id = c.id; }
   if (c.span2 || c.wide) node.style.gridColumn = '1 / -1';
   return node;
@@ -731,6 +849,7 @@ function buildPage(key) {
     const grid = el('div', 'grid');
     for (const c of sec.items || []) grid.append(buildControl(c));
     s.append(grid);
+    sec._grid = grid;
     page.append(s);
   }
   return page;
@@ -739,17 +858,25 @@ function buildPage(key) {
 function fillValues(key) {
   for (const sec of PAGES[key]) {
     for (const c of sec.items || []) {
+      const val = c.key ? cur(c.key) : undefined;
       if (c.t === 'check') {
-        c.el.checked = !!CFG[c.key];          // у input значение — это .checked, не .value
+        c.el.checked = !!val;              // у input значение — это .checked, не .value
       } else if (c.setOptions) {
         c.setOptions(c.options);
-        c.el.value = CFG[c.key];
+        c.el.value = val;
       } else if (c.setValue) {
-        c.setValue(CFG[c.key]);
+        c.setValue(val);
       }
       if (c.paint) c.paint();
     }
   }
+}
+
+/** Текущее значение с учётом личных настроек фигуры: сначала смотрим
+    style_settings[стиль], потом общий конфиг. */
+function cur(key) {
+  const ov = (CFG.style_settings || {})[CFG.style || 'smooth'];
+  return (ov && Object.prototype.hasOwnProperty.call(ov, key)) ? ov[key] : CFG[key];
 }
 
 function buildAll() {
@@ -896,8 +1023,17 @@ function startStream() {
   $('#btnHide').addEventListener('click', () => api.act('toggle_overlay'));
 
   CFG = (await api.cfg()).config || {};
+  try {
+    const sp = await api.styles();
+    STYLE_LIST = sp.styles || [];
+    STYLE_KEYS = {};
+    STYLE_OWN = {};
+    for (const k of Object.keys(sp.keys || {})) STYLE_KEYS[k] = new Set(sp.keys[k]);
+    for (const k of Object.keys(sp.own || {})) STYLE_OWN[k] = new Set(sp.own[k]);
+  } catch (_) { /* сервер без профилей — показываем всё */ }
   BG.build();
   buildAll();
+  applyStyleProfile();
   applyTheme(CFG.web_theme || 'neon');   // после сборки: кнопка и галочки уже в DOM
   await refreshMonitors();
   await refreshAudio();

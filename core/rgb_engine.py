@@ -390,7 +390,7 @@ class RGBEngine(threading.Thread):
                 try:
                     _, _, level, bass, has_sig = self.audio.snapshot()
                 except Exception:
-                    level, bass, has_sig = 0.0, 0.0, False
+                    level, _, has_sig = 0.0, 0.0, False
                 # сглаживание среднего
                 avg += (level - avg) * (1.0 - math.exp(-dt / float(cfg.get("avg_s", 1.5))))
                 mode = cfg.get("rgb_mode", "mix")

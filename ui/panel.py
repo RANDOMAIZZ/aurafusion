@@ -1,15 +1,35 @@
 """Красивая панель AuraFusion: сайдбар + карточки + живое превью."""
-import time
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QColorDialog, QComboBox, QGroupBox, QHBoxLayout,
     QLabel, QListWidget, QListWidgetItem, QPushButton, QProgressBar, QSlider,
-    QSpinBox, QStackedWidget, QVBoxLayout, QWidget,
+    QStackedWidget, QVBoxLayout, QWidget,
 )
 
 from .theme import QSS
+
+
+class _Row:
+    """Строка настройки: ползунок вместе со всей обёрткой.
+
+    setValue идёт на сам ползунок, а setVisible — на обёртку, чтобы вместе с
+    дорожкой скрывались подпись и число."""
+
+    def __init__(self, layout, slider):
+        self.layout = layout
+        self.slider = slider
+        self.item = layout.itemAt(0)
+
+    def setValue(self, v):
+        self.slider.setValue(int(v))
+
+    def setVisible(self, on):
+        self.layout.setVisible(bool(on))
+
+    def isVisible(self):
+        return self.layout.isVisible()
 
 
 def _slider_row(parent, title, lo, hi, val, fmt, on_change, is_int=False, div=100):
@@ -37,7 +57,9 @@ def _slider_row(parent, title, lo, hi, val, fmt, on_change, is_int=False, div=10
     parent.addLayout(wrap)
     hint = QLabel("")
     hint.setObjectName("Hint")
-    return s
+    # возвращаем обёртку, а не сам ползунок: спрятать строку целиком, вместе
+    # с подписью и значением, иначе останется висящая надпись
+    return _Row(wrap, s)
 
 
 class Panel(QWidget):
@@ -148,7 +170,6 @@ class Panel(QWidget):
             pass
 
     def goto(self, key):
-        order = ["viz", "rgb", "amb", "snd", "sys"]
         self.stack.setCurrentWidget(self.pages[key])
         for k, b in self.nav_btns.items():
             b.setChecked(k == key)
@@ -227,20 +248,20 @@ class Panel(QWidget):
         r = QHBoxLayout()
         r.addWidget(QLabel("Стиль:"))
         self.cmb_style = QComboBox()
-        self.cmb_style.addItems(["Плавная волна", "Бары", "Круг", "Бары+волна"])
-        keys = ["smooth", "bars", "circle", "combo"]
+        from ui.overlay import STYLES
+        self.cmb_style.addItems([s[1] for s in STYLES])
+        keys = [s[0] for s in STYLES]
         cur = self._get().get("style", "smooth")
         self.cmb_style.setCurrentIndex(keys.index(cur) if cur in keys else 0)
-        self.cmb_style.currentIndexChanged.connect(lambda i: self._set("style", keys[i]))
+        self.cmb_style.currentIndexChanged.connect(self._on_style)
         r.addWidget(self.cmb_style, 1)
         gv.addLayout(r)
         r2 = QHBoxLayout()
         r2.addWidget(QLabel("Линия:"))
         self.cmb_line = QComboBox()
-        self.cmb_line.addItems(["Неон", "Тонкая", "Жирная", "Двойная", "Пунктир",
-                               "Градиент", "Точки", "Контур", "Ступени", "Яркое ядро"])
-        lk = ["neon", "thin", "fat", "double", "dash", "gradient",
-              "dotted", "outline", "steps", "megaglow"]
+        from ui.overlay import LINE_STYLES
+        self.cmb_line.addItems([s[1] for s in LINE_STYLES])
+        lk = [s[0] for s in LINE_STYLES]
         cur2 = self._get().get("line_style", "thin")
         self.cmb_line.setCurrentIndex(lk.index(cur2) if cur2 in lk else 1)
         self.cmb_line.currentIndexChanged.connect(lambda i: self._set("line_style", lk[i]))
@@ -271,10 +292,29 @@ class Panel(QWidget):
         g2 = QGroupBox("Движение и вид")
         g2v = QVBoxLayout()
         C = self._get()
-        _slider_row(g2v, "Размер / высота", 5, 200, int(C.get("height_scale", 0.55) * 100),
+        _slider_row(g2v, "Размер / высота", 1, 200, int(C.get("height_scale", 0.55) * 100),
                     "%.2f", lambda v: self._set("height_scale", v))
-        _slider_row(g2v, "Гладкость волны", 0, 100, int(C.get("wave_smooth", 0.65) * 100),
-                    "%.2f", lambda v: self._set("wave_smooth", v))
+        # Раньше здесь стоял ползунок wave_smooth. Его ключ оверлей больше не
+        # читает (сглаживание спектра теперь одно на всех — line_smooth), так
+        # что ползунок стал болванкой: крутишь, а ничего не меняется.
+        # Вместо него — два ключа, которые фигура действительно использует.
+        _slider_row(g2v, "Количество линий", 8, 256, int(C.get("line_count", 64)),
+                    "%d", lambda v: self._set("line_count", v), is_int=True)
+        _slider_row(g2v, "Плавность", 0, 100, int(C.get("line_smooth", 0.0) * 100),
+                    "%.2f", lambda v: self._set("line_smooth", v))
+        # Три ручки искр: базовая скорость, разгон на своей частоте и плотность.
+        # Прячутся вместе, если выбран не тот стиль.
+        self.row_spark = [
+            _slider_row(g2v, "Скорость искр", 5, 400,
+                        int(float(C.get("spark_speed", 1.0)) * 100),
+                        "%.2f", lambda v: self._set("spark_speed", v)),
+            _slider_row(g2v, "Разгон на частоте", 0, 600,
+                        int(float(C.get("spark_boost", 1.0)) * 100),
+                        "%.2f", lambda v: self._set("spark_boost", v)),
+            _slider_row(g2v, "Плотность искр", 15, 400,
+                        int(float(C.get("spark_density", 1.0)) * 100),
+                        "%.2f", lambda v: self._set("spark_density", v)),
+        ]
         _slider_row(g2v, "Яркость линии", 40, 255, int(C.get("alpha", 230)), "%d",
                     lambda v: self._set("alpha", v), is_int=True)
         _slider_row(g2v, "Заливка (прозрачность)", 0, 180, int(C.get("fill_alpha", 90)), "%d",
@@ -635,6 +675,9 @@ class Panel(QWidget):
         g.setLayout(gv)
         v.addWidget(g)
         v.addStretch(1)
+        # прячем настройки, не нужные текущей фигуре, сразу при сборке панели:
+        # иначе при старте «Скорость искр» висела бы у любого стиля
+        self._apply_style_visibility()
         return w
 
     def refresh_colormon(self):
@@ -791,6 +834,41 @@ class Panel(QWidget):
             self._set("audio_device", "")
         else:
             self._set("audio_device", self.cmb_audio.itemText(i))
+
+    def _on_style(self, idx):
+        """Смена фигуры: запоминаем её и прячем настройки, которые ей не нужны.
+
+        Раньше выбор стиля ничего не менял: обработчик только выставлял его в
+        конфиг. Теперь заодно обновляем то, что относится к фигуре."""
+        try:
+            from ui.overlay import STYLES
+        except Exception:
+            return
+        if not (0 <= idx < len(STYLES)):
+            return
+        key = STYLES[idx][0]
+        self._set("style", key)
+        self._apply_style_visibility(key)
+
+    def _apply_style_visibility(self, key=None):
+        key = key or self._get().get("style", "smooth")
+        rows = getattr(self, "row_spark", None) or []
+        show = key == "sparks"
+        for row in rows:
+            row.setVisible(show)
+        # значения держим в ползунках в аккуратном состоянии: при первом
+        # показе они могли остаться с дефолтом, пока в конфиге уже другое
+        cfg = self._get()
+        for row, key_name, lo, hi in zip(rows, ("spark_speed", "spark_boost",
+                                                "spark_density"),
+                                         (0.05, 0.0, 0.15),
+                                         (4.0, 6.0, 4.0)):
+            try:
+                want = int(max(lo, min(hi, float(cfg.get(key_name, 1.0)))) * 100)
+                if row.slider.value() != want:
+                    row.setValue(want)
+            except Exception:
+                row.setValue(100)
 
     def _on_sys_check(self, key, val):
         self._set(key, bool(val))

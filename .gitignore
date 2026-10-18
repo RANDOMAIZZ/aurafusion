@@ -21,3 +21,4 @@ Thumbs.db
 .env
 .venv/
 venv/
+.overlay_shots/

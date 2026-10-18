@@ -21,8 +21,122 @@ import traceback
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QApplication
+from PySide6.QtCore import QObject, QTimer, Signal, Slot
+from PySide6.QtCore import Qt
+from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QPen
+from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
+
+
+def tray_icon(app=None):
+    """Значок AuraFusion для трея: кольцо, переливающееся цветами RGB.
+
+    Рисуем кодом, а не грузим файл: рядом может не оказаться ни одного
+    .ico, а значок в трее нужен всегда, когда панель живёт в браузере, —
+    иначе процесс нечем остановить, кроме как через диспетчер задач."""
+    pm = QPixmap(64, 64)
+    pm.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing, True)
+    p.setBrush(QColor(16, 20, 26, 235))
+    p.setPen(QColor(0, 220, 255, 255))
+    p.drawEllipse(2, 2, 60, 60)
+    # Три дуги разных оттенков — намёк на кольца RGB. Углы drawArc берутся
+    # в 1/16 градуса, а не в градусах: из-за этого дуги вылезали за круг
+    # мелким огрызком у края.
+    p.setBrush(QColor(0, 0, 0, 0))
+    for i, col in enumerate((QColor(255, 40, 90), QColor(40, 255, 120), QColor(60, 140, 255))):
+        pen = QPen(col)
+        pen.setWidth(7)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        # Углы drawArc — в 1/16 градуса, поэтому множитель 16 нужен на обоих.
+        # Со стартовым углом без него все три дуги ложились в одно и то же место
+        # и кольцо выглядело одноцветным: зелёный перекрывал красный, а синий
+        # — оба.
+        p.drawArc(12, 12, 40, 40, -(112 + 120 * i) * 16, 88 * 16)
+    p.end()
+    return QIcon(pm)
+
+
+class Tray(QSystemTrayIcon):
+    """Значок в трее: открыть панель, показать/спрятать оверлей, остановить всё.
+
+    Без него процесс с панелью в браузере нечем было закрыть, кроме диспетчера
+    задач, а закрывать его надо аккуратно: конфиг сохраняется, лента BLE
+    отпускается, поток RGB останавливается. Выход из трея идёт через
+    app.quit(), а тот вызывает aboutToQuit — то есть тот же путь, что у
+    Ctrl+C в консоли, со всеми очистками."""
+    def __init__(self, app, url, core, parent=None):
+        super().__init__(parent)
+        self._app = app
+        self._url = url
+        self._core = core
+        self.setIcon(tray_icon())
+        self.setToolTip("AuraFusion")
+        self.activated.connect(self._on_activated)
+
+        m = QMenu()
+        a_open = QAction("Открыть панель", m)
+        a_open.triggered.connect(self.open_panel)
+        m.addAction(a_open)
+        self.a_ovl = QAction("Скрыть оверлей", m)
+        self.a_ovl.triggered.connect(self.toggle_overlay)
+        m.addAction(self.a_ovl)
+        m.addSeparator()
+        a_quit = QAction("Остановить всё", m)
+        a_quit.triggered.connect(self.quit_all)
+        m.addAction(a_quit)
+        self._menu = m
+        self.setContextMenu(m)
+
+    def open_panel(self):
+        try:
+            webbrowser.open(self._url)
+        except Exception:
+            pass
+
+    def toggle_overlay(self):
+        # core.toggle_overlay сам ходит через GuiBridge — из трея мы в главном
+        # потоке, но единый путь всё равно надёжнее
+        try:
+            vis = self._core.toggle_overlay()
+            self.a_ovl.setText("Скрыть оверлей" if vis else "Показать оверлей")
+        except Exception:
+            pass
+
+    def quit_all(self):
+        self._app.quit()
+
+    def _on_activated(self, reason):
+        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
+            self.open_panel()
+
+
+class GuiBridge(QObject):
+    """Переносит вызовы Qt-виджетов в главный поток.
+
+    HTTP-обработчики крутятся в своих потоках, а окном оверлея владеет
+    главный поток Qt. Прямой setVisible() из потока — гонка: виджет
+    перерисовывается там же, где крутится event loop, и всё приложение
+    встаёт. Сигнал между потоками Qt доставляет в очередь главного потока
+    сам, поэтому вызов выполняется там, где безопасно."""
+
+    call = Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        self.call.connect(self._run)
+
+    @Slot(object)
+    def _run(self, fn):
+        try:
+            fn()
+        except Exception:
+            log.exception("gui call failed")
+
+    def post(self, fn):
+        """Поставить вызов в очередь главного потока."""
+        self.call.emit(fn)
 
 from core import config as C
 from core import ble_strip
@@ -180,6 +294,9 @@ class Core:
 
         self.audio = SharedAudio(lambda: self.cfg, n_bars=self.cfg.get("bars", 64))
         self.sc = ScreenColor(lambda: self.cfg)
+        # мост создаётся в главном потоке Qt — там же, где живёт event loop,
+        # поэтому его сигналы доставляются без блокировки
+        self.gui = GuiBridge()
         self.overlay = Overlay(lambda: self.cfg, self.audio, self.sc)
 
     # ---------- конфиг ----------
@@ -207,15 +324,23 @@ class Core:
     def _apply_side_effects(self, keys):
         """Побочные эффекты настроек — в Qt-панели они вызывались инлайн."""
         cfg = self.cfg
+        gui = self.gui
         try:
             if "overlay_fps" in keys:
-                self.overlay.apply_fps()
+                gui.post(self.overlay.apply_fps)
             if "overlay_opacity" in keys:
-                self.overlay.apply_opacity()
+                gui.post(self.overlay.apply_opacity)
             if "monitor" in keys:
-                self.overlay.move_to_monitor(int(cfg.get("monitor", 0) or 0))
+                idx = int(cfg.get("monitor", 0) or 0)
+                gui.post(lambda: self.overlay.move_to_monitor(idx))
             if "click_through" in keys:
-                self.overlay.set_click_through(bool(cfg.get("click_through", True)))
+                on = bool(cfg.get("click_through", True))
+                gui.post(lambda: self.overlay.set_click_through(on))
+            if "avoid_taskbar" in keys:
+                # геометрия окна считается при создании, поэтому снять или
+                # вернуть галку без перезапуска можно только переставив окно
+                idx = int(cfg.get("monitor", 0) or 0)
+                gui.post(lambda: self.overlay.move_to_monitor(idx))
         except Exception as e:
             log.warning("side effects %s: %s", list(keys), e)
 
@@ -411,11 +536,14 @@ class Core:
         threading.Thread(target=work, daemon=True).start()
 
     def toggle_overlay(self):
-        try:
-            self.overlay_visible = not self.overlay.isVisible()
-            self.overlay.setVisible(self.overlay_visible)
-        except Exception:
-            pass
+        # Прямой вызов виджета из потока HTTP-обработчика вешал всё
+        # приложение: окном владеет главный поток Qt. Отдаём через мост.
+        # Состояние держим сами — читать isVisible() из чужого потока тоже
+        # нельзя, он не синхронизирован с главным.
+        want = not self.overlay_visible
+        self.overlay_visible = want
+        self.gui.post(lambda: self.overlay.setVisible(want))
+        return want
 
     # ---------- снимок для браузера ----------
     def snapshot(self, extra_devices=False):
@@ -470,6 +598,31 @@ def action(name):
         ACTIONS[name] = fn
         return fn
     return deco
+
+
+def style_profiles():
+    """Список фигур и набор настроек для каждой.
+
+    Считается один раз из ui.overlay — того же места, откуда берёт оверлей.
+    Интерфейсу нужно, чтобы прятать неуместные ползунки: у круга нет смысла
+    в «ширине по краям экрана», у волны — в «центре фигуры»."""
+    global _STYLE_PROFILES
+    if _STYLE_PROFILES is None:
+        try:
+            from ui.overlay import STYLES, per_style_keys, style_keys
+            _STYLE_PROFILES = {
+                "styles": [[k, n] for k, n in STYLES],
+                # keys — что показывать; own — что писать в личный список стиля
+                "keys": {k: sorted(style_keys(k)) for k, _ in STYLES},
+                "own": {k: sorted(per_style_keys(k)) for k, _ in STYLES},
+            }
+        except Exception as e:
+            log.warning("style profiles: %s", e)
+            _STYLE_PROFILES = {"styles": [], "keys": {}}
+    return _STYLE_PROFILES
+
+
+_STYLE_PROFILES = None
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -536,6 +689,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"names": core.audio_names})
         if path == "/api/monitors":
             return self._json({"screens": core.screens})
+        if path == "/api/styles":
+            return self._json(style_profiles())
         if path == "/api/stream":
             return self._stream(core)
         self.send_error(404)
@@ -666,8 +821,16 @@ def _a_quit(core):
 
 
 def _pump(core, app):
-    """Тик в Qt-потоке: рассылка состояния и кэш мониторов."""
-    t = QTimer()
+    """Тик в Qt-потоке: рассылка состояния, кэш мониторов, автосохранение.
+
+    Таймеры обязательно с родителем `app`. Раньше они создавались без него и
+    вызывающий код держал их в локальной переменной `timers`, которая больше
+    нигде не использовалась: пока жив фрейм main(), всё работало, а стоило
+    переменную убрать — таймеры собрал бы сборщик мусора, и вместе с ними
+    молча умерли бы рассылка в веб-панель и автосохранение конфига раз в 5 с.
+    С `app` родителем их держит Qt, и голый вызов _pump(core, app) достаточен.
+    """
+    t = QTimer(app)
 
     def tick():
         try:
@@ -678,7 +841,7 @@ def _pump(core, app):
     t.timeout.connect(tick)
     t.start(60)          # ~16 Гц: фон должен отзываться на музыку без задержки
 
-    m = QTimer()
+    m = QTimer(app)
 
     def mon():
         try:
@@ -693,10 +856,9 @@ def _pump(core, app):
     m.start(2000)
     mon()
 
-    s = QTimer()
+    s = QTimer(app)
     s.timeout.connect(core.save)
-    s.start(5000)
-    return t, m, s
+    s.start(5000)        # автосохранение: без него настройки терялись бы при выходе
 
 
 def main():
@@ -712,6 +874,13 @@ def main():
 
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
+    # без значка в трее процесс с панелью в браузере закрывать нечем: ни одного
+    # своего окна у него нет. Значок появляем только если система реально его
+    # показывает — иначе меню «Остановить всё» просто некуда нажать.
+    if QSystemTrayIcon.isSystemTrayAvailable():
+        app.setQuitOnLastWindowClosed(False)
+    else:
+        log.warning("трея нет — закрывать процесс придётся через диспетчер задач")
 
     core = Core()
     Handler.core = core
@@ -728,7 +897,7 @@ def main():
     QTimer.singleShot(400, lambda: core.overlay.set_click_through(
         bool(core.cfg.get("click_through", True))))
 
-    timers = _pump(core, app)
+    _pump(core, app)
 
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
@@ -768,6 +937,12 @@ def main():
             ble_strip.close_all()
         except Exception:
             pass
+
+    tray = None
+    if QSystemTrayIcon.isSystemTrayAvailable():
+        tray = Tray(app, url, core)
+        tray.show()
+        log.info("трея: значок AuraFusion добавлен")
 
     app.aboutToQuit.connect(_bye)
     try:

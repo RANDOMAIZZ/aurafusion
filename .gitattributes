@@ -1,0 +1,14 @@
+# cmd.exe не понимает файлы с одними LF: он читает весь файл как одну строку
+# и пытается выполнить каждое слово по отдельности. Из-за этого run_web.bat
+# сыпал «'7.0.0.1' is not recognized...». Прямо требуем CRLF, независимо от
+# core.autocrlf в чужой копии репозитория.
+*.bat   text eol=crlf
+*.cmd   text eol=crlf
+
+# веб-интерфейс и питон читаются как есть, приводим только окончания строк
+*.py    text eol=lf
+*.js    text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.json  text eol=lf
+*.md    text eol=lf
