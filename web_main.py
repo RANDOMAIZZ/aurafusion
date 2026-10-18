@@ -10,6 +10,7 @@
 Запуск:
     python web_main.py [--port 8765] [--host 127.0.0.1] [--no-browser]
 """
+import faulthandler
 import json
 import logging
 import os
@@ -225,6 +226,20 @@ LOG_PATH = os.path.join(BASE_DIR, "aurafusion.log")
 logging.basicConfig(filename=LOG_PATH, level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(message)s", encoding="utf-8")
 log = logging.getLogger("aurafusion.web")
+
+# Дамп при падении — в отдельный файл, потому что обычный лог при 0xc0000005
+# обрывается на полуслове: процесс умирает, не дописав ни строчки.
+# Происходило это с pythonw в python314.dll без внятной причины, и без этого
+# файла каждый раз оставалось только «процесс умер, в логе пусто».
+CRASH_PATH = os.path.join(BASE_DIR, "crash.log")
+try:
+    _crash = open(CRASH_PATH, "a", buffering=1, encoding="utf-8")
+    faulthandler.enable(file=_crash, all_threads=True)
+except Exception:      # не фатально: без дампа просто по-старому
+    try:
+        faulthandler.enable(all_threads=True)
+    except Exception:
+        pass
 
 
 def _exchook(t, v, tb):

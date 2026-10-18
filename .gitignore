@@ -10,6 +10,7 @@ dist/
 build/
 .eggs/
 *.log
+crash.log
 openrgb_stdout.log
 .DS_Store
 Thumbs.db
