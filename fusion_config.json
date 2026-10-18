@@ -1,5 +1,5 @@
 {
-  "style": "sparks",
+  "style": "peak",
   "bars": 128,
   "overlay_fps": 60,
   "sensitivity": 3,
@@ -53,12 +53,12 @@
       "height_scale": 2
     },
     "peak": {
-      "height_scale": 0.05,
+      "height_scale": 0.09,
       "viz_w": 1,
       "viz_x": 0,
       "viz_y": 1,
       "wave_smooth": 0.56,
-      "line_count": 128,
+      "line_count": 97,
       "line_smooth": 0.95
     },
     "particles": {
@@ -153,14 +153,15 @@
       "line_count": 256
     },
     "sparks": {
-      "height_scale": 0.47,
+      "height_scale": 0.58,
       "line_count": 256,
       "line_smooth": 1,
       "viz_y": 1,
       "viz_w": 1,
-      "spark_speed": 0.29,
+      "spark_speed": 0.19,
       "spark_boost": 6,
-      "spark_density": 4
+      "spark_density": 4,
+      "spark_glow": 1
     }
   },
   "line_count": 64,
@@ -168,9 +169,10 @@
   "spark_speed": 1.6,
   "spark_boost": 2.5,
   "spark_density": 2.0,
+  "spark_glow": 0.5,
   "beat_pulse": true,
   "beat_strength": 0,
-  "overlay_opacity": 1.0,
+  "overlay_opacity": 1,
   "bass_gain": 1.32,
   "mid_gain": 2.5,
   "treble_gain": 3,

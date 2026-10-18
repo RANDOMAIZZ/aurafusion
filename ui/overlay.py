@@ -241,7 +241,8 @@ def per_style_keys(style):
     keys = {"height_scale", "line_count", "line_smooth"}
     if style == "sparks":
         # скорость, разгон и плотность — только у искр, у остальных фигур их нет
-        keys |= {"spark_speed", "spark_boost", "spark_density", "spark_glow"}
+        keys |= {"spark_speed", "spark_boost", "spark_density", "spark_glow",
+                "spark_glow_start", "spark_glow_end"}
     if style in BASE_STYLES:
         keys |= {"viz_x", "viz_y", "viz_w"}
     if style in CENTER_STYLES:
@@ -1849,7 +1850,18 @@ class Overlay(QWidget):
         # возвращаемся к одиночной отрисовке — иначе платим втрое за то,
         # что выключено.
         glow = float(np.clip(S.get("spark_glow", 0.5), 0.0, 1.0))
-        passes = ((2.9, 0.10), (1.8, 0.22), (1.0, 1.0)) if glow > 0.02 else ((1.0, 1.0),)
+        # Где по высоте полёта горит ореол. Полёт идёт от базовой линии
+        # (0.0) до вершины (1.0), поэтому окно задаётся двумя ползунками:
+        # начало и конец. Края окна мягкие, иначе был бы видимый стык на
+        # частицах. По умолчанию горит внизу и гаснет к вершине; если
+        # поднять начало к 0.6, снизу искры чистые, а загораются у верха.
+        g_a = float(np.clip(S.get("spark_glow_start", 0.0), 0.0, 1.0))
+        g_b = float(np.clip(S.get("spark_glow_end", 0.55), 0.0, 1.0))
+        if g_b < g_a:
+            g_a, g_b = g_b, g_a
+        # ширина мягкого края окна — чтобы переход не был ступенькой
+        edge = max(0.08, 0.5 * (g_b - g_a)) if g_b > g_a else 0.5 * (1.0 - g_a)
+        passes = ((2.9, 0.10), (1.8, 0.22), (1.0, 1.0))
         brush = QBrush(Qt.SolidPattern)
         p.setPen(Qt.NoPen)
         for i in range(cap):
@@ -1878,12 +1890,35 @@ class Overlay(QWidget):
             # цвет по полосе, яркость — по силе полосы и по доле жизни
             lvl = float(np.clip(0.3 + 0.7 * (amp * 0.6 + v * 0.4), 0.0, 1.0))
             a0 = alpha * (0.35 + 0.65 * v)
+            # сколько ореола по этой высоте: 0 — частица чистая, 1 — полный
+            if glow > 0.02:
+                prog = 1.0 - v ** 0.5          # 0 у базовой линии, 1 на вершине
+                if prog < g_a - edge:
+                    gw = 0.0
+                elif prog < g_a:
+                    gw = (prog - (g_a - edge)) / edge if edge > 0 else 1.0
+                elif prog <= g_b:
+                    gw = 1.0
+                elif prog < g_b + edge:
+                    gw = 1.0 - (prog - g_b) / edge if edge > 0 else 0.0
+                else:
+                    gw = 0.0
+                gw = float(np.clip(gw, 0.0, 1.0))
+            else:
+                gw = 0.0
             c = self._bar_color(b, lvl, 255)
             x = float(st["x"][i])
             y = float(y)
+            if gw <= 0.02:
+                # ореола нет — рисуем только саму точку, одним проходом
+                c.setAlpha(int(a0))
+                brush.setColor(c)
+                p.setBrush(brush)
+                p.drawEllipse(QRectF(x - rad, y - rad, rad * 2, rad * 2))
+                continue
             for k, wa in passes:
-                r = rad * (1.0 + (k - 1.0) * glow)
-                c.setAlpha(int(a0 * wa))
+                r = rad * (1.0 + (k - 1.0) * glow * gw)
+                c.setAlpha(int(a0 * wa * gw))
                 brush.setColor(c)
                 p.setBrush(brush)
                 p.drawEllipse(QRectF(x - r, y - r, r * 2, r * 2))
