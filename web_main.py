@@ -23,7 +23,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QBuffer
 from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QPen
 from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
 
@@ -57,6 +57,35 @@ def tray_icon(app=None):
         p.drawArc(12, 12, 40, 40, -(112 + 120 * i) * 16, 88 * 16)
     p.end()
     return QIcon(pm)
+
+
+_ICON_PNG = {}   # размер -> байты PNG
+
+
+def icon_png(size=64):
+    """PNG того же значка, что и в трее.
+
+    Отдельный файл с картинкой разъехался бы со значком при первой же правке
+    одного из двух, поэтому браузер получает ровно то, что рисует
+    tray_icon().
+
+    Рисуем в главном потоке и складываем в кэш: QPixmap из потока обработчика
+    HTTP трогать нельзя, а картинка всё равно не меняется — цвета в значке
+    заданы константами, не берутся от ленты.
+    """
+    key = int(size)
+    if key in _ICON_PNG:
+        return _ICON_PNG[key]
+    buf = QBuffer()
+    buf.open(QBuffer.ReadWrite)
+    try:
+        pix = tray_icon().pixmap(key, key)
+        ok = pix.save(buf, "PNG")
+        data = bytes(buf.data()) if ok else b""
+    finally:
+        buf.close()
+    _ICON_PNG[key] = data
+    return data
 
 
 class Tray(QSystemTrayIcon):
@@ -745,12 +774,28 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _icon(self, size):
+        data = icon_png(size)
+        if not data:
+            return self.send_error(404)
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
     # ---------- маршруты ----------
     def do_GET(self):
         core = Handler.core
         path = self.path.split("?")[0]
         if path in ("/", "/index.html"):
             return self._file("index.html")
+        # /favicon.ico отдаём тем же PNG: браузер запрашивает его сам, когда
+        # в странице нет тега link, а вкладывать .ico только ради этого
+        # значит держать вторую копию картинки
+        if path in ("/favicon.ico", "/favicon.png"):
+            return self._icon(64)
         if path.startswith("/static/"):
             return self._file(path[len("/static/"):])
         if path == "/api/config":
@@ -980,6 +1025,13 @@ def main():
         bool(core.cfg.get("click_through", True))))
 
     _pump(core, app)
+
+    # Значок для вкладки браузера рисуем заранее, в главном потоке и до
+    # старого сервера: обработчик HTTP отдаёт только готовые байты.
+    try:
+        icon_png(64)
+    except Exception as e:
+        log.warning("иконку вкладки отдать не выйдет: %s", e)
 
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
