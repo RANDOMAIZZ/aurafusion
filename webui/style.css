@@ -255,15 +255,45 @@ button{font-family:inherit;}
 .btnrow .btn{flex:1 1 170px;}
 /* кнопка с пояснением под ней: пояснение — часть кнопки, а не отдельный
    текст, иначе непонятно, к какой кнопке он относится */
-.btncell{flex:1 1 170px;display:flex;flex-direction:column;gap:5px;}
+.btncell{flex:1 1 170px;display:flex;flex-direction:column;gap:5px;position:relative;}
 .btncell .btn{flex:0 0 auto;width:100%;}
 .btncell .btnhint{color:var(--dim);font-size:11px;line-height:1.45;padding:0 2px;}
+/* кнопка и знак «?» рядом */
+.brow{display:flex;align-items:center;gap:6px;}
+.brow .btn{flex:1 1 auto;width:auto;}
 /* Пояснение под плиткой. Всегда в DOM (и подсказка при наведении), но
    показывается по общему переключателю «Пояснения» — с текстом под каждым
    из 106 ползунков панель превращалась бы в стену. */
 .tdesc{display:none;color:var(--dim);font-size:11px;line-height:1.45;margin-top:6px;
   border-left:2px solid var(--line,#2a3340);padding-left:8px;}
 body.expl .tdesc{display:block;}
+/* Знак вопроса рядом с названием. Наведение (или фокус с клавиатуры)
+   открывает пояснение. Сам поповер — один на всю панель, позицию считает
+   JS: через ::after он уезжал бы за окно у правого края и срезался бы
+   скролл-контейнером у нижнего ряда плиток. */
+.qmark{
+  flex:0 0 auto;display:inline-flex;align-items:center;justify-content:center;
+  width:14px;height:14px;border-radius:50%;cursor:help;
+  border:1px solid var(--line-soft);color:var(--muted);font-size:10px;
+  font-weight:700;line-height:1;user-select:none;align-self:center;
+  transition:color .14s,border-color .14s,background .14s;
+}
+.qmark:hover,.qmark:focus-visible{
+  color:var(--accent);border-color:var(--accent);background:color-mix(in srgb,var(--accent) 14%,transparent);
+  outline:none;
+}
+/* само пояснение */
+.popover{
+  position:fixed;z-index:60;max-width:340px;padding:9px 11px;border-radius:8px;
+  background:var(--tile2,#161b22);color:var(--text);
+  border:1px solid var(--line);box-shadow:0 10px 28px rgba(0,0,0,.5);
+  font-size:11.5px;line-height:1.5;
+  opacity:0;visibility:hidden;transition:opacity .13s,visibility .13s;
+  pointer-events:none;
+}
+.popover.on{opacity:1;visibility:visible;}
+/* к чему привязан поповер */
+.tile,.dd{position:relative;}
 /* переключатель пояснений в шапке страницы */
 .exprow{grid-column:1 / -1;display:flex;justify-content:flex-end;margin-bottom:-6px;}
 .exprow .expwrap{display:flex;align-items:center;gap:7px;font-size:11.5px;

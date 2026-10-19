@@ -47,20 +47,66 @@ function toast(msg) {
 }
 
 /* ================= плитки ================= */
-function tile(title, valueNode) {
+function tile(title, valueNode, desc) {
   const w = el('div', 'tile');
   if (title) {
     const top = el('div', 'top');
     top.append(el('span', 't', title));
+    // Знак вопроса рядом с названием: наведение открывает пояснение.
+    // Раньше описание лежало отдельной строкой под плиткой, и панель из
+    // 93 ползунков превращалась в стену текста.
+    if (desc) top.append(qmark(desc));
     if (valueNode) top.append(valueNode);
     w.append(top);
   }
   return w;
 }
 
+// Всплывающее пояснение — один на всю панель, позиция считается под экран.
+// Через ::after было проще, но поповер у нижнего ряда плиток вылезал бы вниз
+// и срезался скролл-контейнером, а у правого края уезжал за окно.
+let POP = null;
+
+function popShow(q, desc) {
+  if (!POP) {
+    POP = el('div', 'popover');
+    document.body.appendChild(POP);
+  }
+  POP.textContent = desc;
+  POP.classList.add('on');
+  const r = q.getBoundingClientRect();
+  const p = POP.getBoundingClientRect();
+  const W = window.innerWidth, H = window.innerHeight;
+  let top = r.bottom + 8;
+  if (top + p.height > H - 8) top = Math.max(8, r.top - p.height - 8);
+  let left = r.left + r.width / 2 - p.width / 2;
+  left = Math.max(8, Math.min(left, W - p.width - 8));
+  POP.style.top = Math.round(top) + 'px';
+  POP.style.left = Math.round(left) + 'px';
+}
+
+function popHide() {
+  if (POP) POP.classList.remove('on');
+}
+
+// Знак «?» с пояснением по наведению. Работает и с клавиатуры: по Tab
+// знак получает фокус, и пояснение открывается.
+function qmark(desc) {
+  const q = el('span', 'qmark', '?');
+  q.setAttribute('data-desc', desc);
+  q.setAttribute('tabindex', '0');
+  q.setAttribute('role', 'button');
+  q.setAttribute('aria-label', 'Пояснение: ' + desc);
+  q.addEventListener('mouseenter', () => popShow(q, desc));
+  q.addEventListener('mouseleave', popHide);
+  q.addEventListener('focus', () => popShow(q, desc));
+  q.addEventListener('blur', popHide);
+  return q;
+}
+
 function mkSlider(c) {
   const v = el('span', 'v');
-  const w = tile(c.label, v);
+  const w = tile(c.label, v, c.desc);
   const well = el('div', 'well');       // та же подложка, что у списков
   const s = el('input');
   s.type = 'range';
@@ -113,6 +159,7 @@ function mkCheck(c) {
   const track = el('span', 'track');
   track.append(el('span', 'knob'));
   l.append(i, track, el('span', 'lbl', c.label));
+  if (c.desc) l.append(qmark(c.desc));
   l.addEventListener('click', (e) => {
     // нативный клик по скрытому input не сработает — переключаем сами
     e.preventDefault();
@@ -133,7 +180,11 @@ function mkCheck(c) {
 function mkSelect(c) {
   const w = el('div', 'dd');
   if (c.wide) w.style.gridColumn = '1 / -1';
-  if (c.label) w.append(el('div', 'fl', c.label));
+  if (c.label) {
+    const fl = el('div', 'fl', c.label);
+    if (c.desc) fl.append(qmark(c.desc));
+    w.append(fl);
+  }
   const btn = el('button', 'ddbtn');
   const nm = el('span', 'nm');
   const chev = el('span', 'chev', '▼');
@@ -208,7 +259,7 @@ function mkSelect(c) {
 }
 
 function mkColor(c) {
-  const w = tile(c.label);
+  const w = tile(c.label, null, c.desc);
   const b = el('button', 'chip well');  // подложка как у ползунков и списков
   const lab = el('span');
   const inp = el('input');
@@ -977,15 +1028,20 @@ function buildControl(c) {
     for (const b of c.items) {
       // Пояснение живёт под кнопкой, в той же ячейке: отдельным текстом
       // оно читалось как «просто текст», и к какой кнопке относится —
-      // неясно.
+      // неясно. Плюс знак «?» — по наведению открывает то же самое.
       const cell = el('div', 'btncell');
       const btn = el('button', 'btn' + (b.cls ? ' ' + b.cls : ''), b.label);
       btn.addEventListener('click', async () => {
         await api.act(b.action);
         toast(b.toast || 'готово');
       });
-      cell.append(btn);
-      if (b.desc) cell.append(el('div', 'btnhint', b.desc));
+      const brow = el('div', 'brow');
+      brow.append(btn);
+      // Знак «?» рядом с кнопкой: наведение открывает пояснение. Раньше оно
+      // лежало строкой под кнопкой — и это превращало ряд кнопок в кашу из
+      // текста, а к какой кнопке он относится — сразу и не разберёшь.
+      if (b.desc) brow.append(qmark(b.desc));
+      cell.append(brow);
       row.append(cell);
     }
     return row;
@@ -1008,7 +1064,6 @@ function buildControl(c) {
   if (node && node.classList && node.classList.contains('tile') && c.desc) {
     const d = el('div', 'tdesc', c.desc);
     node.append(d);
-    node.title = c.desc;
   }
   return node;
 }
@@ -1016,15 +1071,16 @@ function buildControl(c) {
 function buildPage(key) {
   const page = el('div', 'page');
   page.dataset.page = key;
-  // Переключатель пояснений. По умолчанию включён: без него половина
-  // настроек выглядит как загадка, а названия («Порог импульса»,
-  // «Базовая линия») ничего не объясняют.
+  // Переключатель пояснений. Основной способ — знак «?» рядом с названием,
+  // по наведению. Этот переключатель показывает ВСЕ пояснения разом, для
+  // тех, кому нужно прочитать всё подряд. По умолчанию выключен: с текстом
+  // под каждым из 93 ползунков панель превращается в стену.
   const top = el('div', 'exprow');
   const sw = el('label', 'expwrap');
   const cbx = el('input');
   cbx.type = 'checkbox';
-  cbx.checked = localStorage.getItem('aura.expl') !== '0';
-  sw.append(cbx, el('span', null, 'Показывать пояснения'));
+  cbx.checked = localStorage.getItem('aura.expl') === '1';
+  sw.append(cbx, el('span', null, 'Показать все пояснения'));
   cbx.addEventListener('change', () => {
     localStorage.setItem('aura.expl', cbx.checked ? '1' : '0');
     document.body.classList.toggle('expl', cbx.checked);
