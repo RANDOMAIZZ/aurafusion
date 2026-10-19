@@ -259,7 +259,8 @@ def per_style_keys(style):
         # скорость, разгон и плотность — только у искр, у остальных фигур их нет
         keys |= {"spark_speed", "spark_boost", "spark_density", "spark_glow",
                 "spark_glow_start", "spark_glow_end", "spark_size",
-                "spark_burst_count", "spark_burst_height", "spark_hover"}
+                "spark_burst_count", "spark_burst_height", "spark_hover",
+                "spark_bass_burst"}
     if style in BASE_STYLES:
         keys |= {"viz_x", "viz_y", "viz_w"}
     if style in CENTER_STYLES:
@@ -2255,9 +2256,53 @@ class Overlay(QWidget):
         # Раньше разгон бил по всем частицам колонки сразу, включая фоновые,
         # и эффекта обгона не было: поднимался весь столбик целиком.
         base_kick = 0.30 + 0.45 * loud
+        # --- сильный удар баса: отдельный пучок из одной точки ---
+        #
+        # Детектор бита ловит удар по росту энергии НИЖНЕЙ ПОЛОВЫ спектра, а
+        # это уже середина: удар по малому барабату проходит там же, где и
+        # бочка. Для «выстрела пучком» нужен именно бас, поэтому своя
+        # энергия: среднее квадратов по самым низким полосам (шестая часть
+        # спектра) и резкий скачок этой энергии.
+        #
+        # Порог не фиксированный, а от своей же истории: удар считается
+        # сильным, если бас подскочил в полтора-два раза выше среднего за
+        # последние доли секунды. На тихой дорожке порог опускается сам, на
+        # громкой — поднимается, иначе пучок летел бы на каждой ноте.
+        bass_punch = 0.0
+        bass_x = 0.5
+        nbass = 0
+        burst_s = float(np.clip(S.get("spark_bass_burst", 0.5), 0.0, 1.0))
+        if n >= 2 and burst_s > 0.01:
+            lo_n = max(2, n // 6)
+            lo = np.asarray(self.lines[:lo_n], dtype=np.float32)
+            be = float(np.mean(lo * lo)) if len(lo) else 0.0
+            prev_be = st.get("prev_be")
+            if prev_be is None:
+                # Первый кадр: база ещё не с чем сравнивать, иначе любой звук
+                # выглядит как скачок с нуля — на старте и после каждой паузы
+                # выстрелял бы фантомный пучок.
+                st["prev_be"] = be
+                st["be_avg"] = be
+                prev_be = be
+            be_rise = max(0.0, be - prev_be)
+            st["prev_be"] = be
+            avg_be = float(st.get("be_avg", 0.0))
+            avg_be = avg_be * 0.94 + be * 0.06
+            st["be_avg"] = avg_be
+            thr = max(0.010, avg_be * 1.7)
+            if be_rise > thr and be > 0.02:
+                # сила удара: насколько бас превысил свою обычную энергию
+                bass_punch = min(1.0, be_rise / max(thr, 1e-4))
+                # где ударило: самая низкая полоса, а не самая громкая — удар
+                # баса это и есть низ. Точка пучка — по ней, иначе пучок
+                # всегда вылетал бы из середины и не читался.
+                k_b = int(np.argmax(lo))
+                bass_x = (k_b + 0.5) / float(lo_n)
+                nbass = int(burst_s * (4.0 + 26.0 * bass_punch))
         if not alive:
             flow = 0.0
             fast = 0.0
+            nbass = 0
         else:
             # Фон: пока играет музыка, по всей площади идёт ровный поток.
             # Важная поправка — поток НЕ должен упираться в bass: раньше он
@@ -2276,8 +2321,9 @@ class Overlay(QWidget):
         st["facc"] = min(st["facc"] + fast, cap * 0.35)
         nf = int(st["facc"])
         st["facc"] -= nf
-        for q in range(nb + nf):
+        for q in range(nb + nf + nbass):
             is_fast = q >= nb
+            is_bass = q >= (nb + nf)
             i = st["head"]
             st["head"] = (st["head"] + 1) % cap
             # Слот занят — пропускаем выпуск, а не перезаписываем.
@@ -2299,7 +2345,15 @@ class Overlay(QWidget):
             if k >= n:
                 k = n - 1
             amp = float(vals[k]) if n else 0.0
-            if is_fast:
+            if is_bass:
+                # Пучок на басовом ударе: полоса та, где бас и ударил, а
+                # скорость — в разы выше обычной. Вот это и есть «пучком».
+                lo_n2 = max(2, n // 6)
+                k = min(int(bass_x * lo_n2), lo_n2 - 1)
+                k = max(0, k)
+                amp = max(amp, float(vals[k]) if n else 0.0)
+                drive = base_kick * (1.6 + 2.4 * bass_punch)
+            elif is_fast:
                 # Сила всплеска этой полосы: 1 там, где скачок сильнее всех.
                 # Даже на нулевом разгоне быстрая частица вдвое быстрее фона:
                 # обгон виден даже при boost = 0.
@@ -2311,7 +2365,15 @@ class Overlay(QWidget):
                 # видна глазом. Скорость фона — исходная, ползунок разгона
                 # на него не действует.
                 drive = base_kick
-            st["x"][i] = x0 + w * ((k + np.random.rand()) / max(1, n))
+            if is_bass:
+                # Пучок вылетает из одной точки: разброс по горизонтали крошечный,
+                # иначе это не пучок, а ещё одна полоса. Точка — та, где бас
+                # ударил, поэтому по спектру видно, куда пришёлся удар.
+                spread = 0.012 * (1.0 + 0.6 * np.random.rand())
+                st["x"][i] = x0 + w * float(np.clip(bass_x + (np.random.rand() - 0.5) * spread,
+                                                   0.0, 1.0))
+            else:
+                st["x"][i] = x0 + w * ((k + np.random.rand()) / max(1, n))
             st["y"][i] = y_base - 1.0
             # Стартовая скорость подъёма. Раньше было (260 + loud*900), и при
             # дефолтах фон поднимался на 40 px — то есть на 1080p это была
@@ -2327,7 +2389,12 @@ class Overlay(QWidget):
             scale = max(0.35, H / 720.0)
             vy = (-(400.0 + loud * 1350.0) * hs * (0.55 + 0.75 * j)
                   * drive * spd * scale)
-            if is_fast:
+            if is_bass:
+                # Пучок летит заметно быстрее фона: ради этого всё и затевалось,
+                # «выстрел из сопла», а не ещё одна струйка. Чем сильнее удар,
+                # тем быстрее — сила удара идёт прямо в скорость.
+                vy *= (1.0 + 1.8 * bass_punch)
+            if is_fast or is_bass:
                 # Потолок высоты всплеска. Вершина баллистического полёта —
                 # vy²/2g, поэтому ограничить высоту можно ограничением
                 # скорости: vy_max = sqrt(2·g·(остаток)). Из полного потолка
