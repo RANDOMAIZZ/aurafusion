@@ -23,3 +23,4 @@ Thumbs.db
 .venv/
 venv/
 .overlay_shots/
+.playwright-mcp/

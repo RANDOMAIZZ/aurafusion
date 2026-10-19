@@ -27,10 +27,22 @@ N, W, H = 64, 1280, 720
 
 
 class Fake:
+    """Спектр с живым движением: у полосы 40..46 волнами идут вбок.
+
+    Искры смотрят не на высоту спектра, а на её рост, поэтому статичный
+    спектр для проверки разгона бесполезен: роста нет, всплесков нет,
+    и все частицы летят с одинаковой скоростью при любом разгоне.
+    """
+
     def __init__(self, spec, level, bass):
         self.spec, self.level, self.bass = spec, level, bass
+        self.base, self.t = spec.copy(), 0.0
 
     def snapshot(self):
+        self.t += 1.0 / 60.0
+        hit = 1.0 if (self.t % 0.35) < 0.06 else 0.0
+        s = self.base * (0.25 + 1.1 * hit)
+        self.spec = s.astype(np.float32)
         return (self.spec.copy(), np.zeros(512, np.float32),
                 self.level, self.bass, True)
 

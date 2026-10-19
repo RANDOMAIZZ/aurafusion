@@ -24,7 +24,8 @@ SAFE_KEYS = {
     "max_brightness", "follow_screen", "color_algo", "dark_threshold",
     "auto_balance", "dynamics", "sensitivity", "exclude_viz",
     "auto_hide", "click_through", "avoid_taskbar", "beat_mode",
-    "spark_speed", "spark_boost", "spark_density", "viz_w",
+    "spark_speed", "spark_boost", "spark_density", "spark_size", "viz_w",
+    "spark_burst_count", "spark_burst_height",
 }
 
 
@@ -85,6 +86,7 @@ BUILTIN = [
             "beat_pulse": True, "beat_strength": 0.85,
             "overlay_opacity": 1.0, "sys_fx": True, "sys_zoom": 0.25,
             "spark_speed": 1.6, "spark_boost": 2.5, "spark_density": 2.0,
+            "spark_burst_count": 1.4, "spark_burst_height": 0.90,
             "dark_threshold": 0, "max_brightness": 1.0, "min_brightness": 0.06,
         },
     },
