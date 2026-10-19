@@ -396,6 +396,16 @@ class Overlay(QWidget):
         # выглядели одинаково — «цвет завис», и непонятно где искать.
         self._stat = {"ok": 0, "dark": 0, "masked": 0, "err": 0,
                       "busy": 0, "skip": 0, "None": 0}
+        # Счётчики пучка на басу: сколько ударов поймано, сколько частиц
+        # запрошено, сколько выпущено и сколько запросилось, но места в
+        # буфере не было. Без них «пучок то появляется, то нет» нечем было
+        # лечить — причина была не видна.
+        self._stat["punch_hits"] = 0
+        self._stat["punch_req"] = 0
+        self._stat["punch_ok"] = 0
+        self._stat["punch_drop"] = 0
+        self._stat["spark_alive"] = 0
+        self._stat["spark_cap"] = 0
         # Честный fps оверлея. Считаем сами окна, а не верим настройке:
         # раньше в панели показывалось заданное значение, а не то, что
         # выдаёт машина, и просадки были не видны вообще.
@@ -1085,6 +1095,12 @@ class Overlay(QWidget):
             self._region_flash_until = time.time() + 5.0
 
         spec, wave, level, bass_raw, has_sig = self.audio.snapshot()
+        # Настоящий бас: энергия полосы 20-250 Гц прямо из FFT, без
+        # автобалансировки и без сглаживания. Всё остальное, что есть в
+        # приложении, — это уже выровненный спектр, а в нём удар баса
+        # растянут на 15-20 кадров и неотличим от плавного подъёма. Пучок
+        # на басу ловится только по этому значению.
+        self._bass_raw = float(bass_raw)
         demo = bool(S.get("demo"))
         if len(spec) != len(self.disp):
             self.disp = np.zeros(len(spec), dtype=np.float32)
@@ -2274,31 +2290,68 @@ class Overlay(QWidget):
         burst_s = float(np.clip(S.get("spark_bass_burst", 0.5), 0.0, 1.0))
         if n >= 2 and burst_s > 0.01:
             lo_n = max(2, n // 6)
-            lo = np.asarray(self.lines[:lo_n], dtype=np.float32)
-            be = float(np.mean(lo * lo)) if len(lo) else 0.0
-            prev_be = st.get("prev_be")
-            if prev_be is None:
-                # Первый кадр: база ещё не с чем сравнивать, иначе любой звук
-                # выглядит как скачок с нуля — на старте и после каждой паузы
-                # выстрелял бы фантомный пучок.
-                st["prev_be"] = be
-                st["be_avg"] = be
-                prev_be = be
-            be_rise = max(0.0, be - prev_be)
-            st["prev_be"] = be
-            avg_be = float(st.get("be_avg", 0.0))
-            avg_be = avg_be * 0.94 + be * 0.06
-            st["be_avg"] = avg_be
-            thr = max(0.010, avg_be * 1.7)
-            if be_rise > thr and be > 0.02:
-                # сила удара: насколько бас превысил свою обычную энергию
-                bass_punch = min(1.0, be_rise / max(thr, 1e-4))
-                # где ударило: самая низкая полоса, а не самая громкая — удар
-                # баса это и есть низ. Точка пучка — по ней, иначе пучок
-                # всегда вылетал бы из середины и не читался.
-                k_b = int(np.argmax(lo))
-                bass_x = (k_b + 0.5) / float(lo_n)
-                nbass = int(burst_s * (4.0 + 26.0 * bass_punch))
+            # Энергия баса 20-250 Гц прямо из движка звука — сырая, без
+            # автобалансировки спектра. В выровненном спектре удар баса
+            # растягивается на 15-20 кадров и неотличим от плавного
+            # подъёма: за 25 секунд не ловилось ни одного удара, а порог
+            # avg*1.7 был недостижим — базовая энергия гуляла 0.4..0.97, а
+            # порог стоял на 1.0..1.5.
+            br = float(getattr(self, "_bass_raw", 0.0))
+            # БАЗОВАЯ ЛИНИЯ, а не пик. Раньше сравнивали с оболочкой-пиком,
+            # и это ломало две вещи: срабатывало слишком часто (41 удар за
+            # 20 секунд — пучок бы не бил по бочке, а постоянно плевался),
+            # и следующий удар той же силы уже не проходил — пик-то держался.
+            # Базовая линия — медленное среднее: между ударами бас держится
+            # на своём обычном уровне, и на нём удара быть не может.
+            baseline = float(st.get("bass_base", br))
+            prev_br = float(st.get("prev_br", br))
+            # Порог снизу — относительно уровня музыки, а не абсолютный:
+            # энергия баса 20-250 Гц по шкале движка очень мала (десятки
+            # тысячных), и абсолютный порог 0.004 отсекал всё напрочь.
+            floor = max(1e-7, float(getattr(self, "_level", 0.0)) * 0.0002)
+            # Рост — удар это нарастание, а не ровный гул. Без этого на
+            # басовой линии с ровным гулом срабатывало бы постоянно.
+            rising = br > prev_br * 1.01
+            if rising and br > max(baseline * 2.0, floor):
+                # Сила удара: во сколько раз бас превысил базовую линию.
+                ratio = br / max(baseline, 1e-9)
+                bass_punch = float(np.clip((ratio - 2.0) / 3.0, 0.0, 1.0))
+                # Не чаще одного раза на 120 мс: бас держится несколько
+                # кадров после удара, и без этой паузы один удар давал
+                # два-три пучка подряд.
+                now = time.monotonic()
+                last_p = float(st.get("last_punch", -10.0))
+                if now - last_p >= 0.12:
+                    st["last_punch"] = now
+                    st["punch_hits"] = st.get("punch_hits", 0) + 1
+                    # где ударило: полоса с самым громким басом.
+                    raw = getattr(self, "_beat_in", None)
+                    if raw is None or len(raw) != len(self.lines):
+                        raw = np.asarray(self.lines, dtype=np.float32)
+                    lo = np.asarray(raw[:lo_n], dtype=np.float32)
+                    k_b = int(np.argmax(lo)) if len(lo) else 0
+                    # Точка вылета — по полосе, где бас ударил. Бас это самые
+                    # низкие полосы, а они в спектре слева, поэтому пучок
+                    # всегда слева. Но у самого края экрана половина пучка
+                    # уходит за границу, и его не видно: отступаем от края.
+                    bass_x = (k_b + 0.5) / float(lo_n)
+                    bass_x = float(np.clip(bass_x, 0.035, 0.30))
+                    # Частиц должно хватать на видимый пучок даже при
+                    # несильном ударе — иначе получится плевок, а не пучок.
+                    nbass = int(burst_s * (12.0 + 40.0 * bass_punch))
+                    st["punch_req"] = st.get("punch_req", 0) + nbass
+            st["bass_base"] = baseline * 0.97 + br * 0.03
+            st["prev_br"] = br
+            st["be_now"] = br
+            st["be_avg_now"] = baseline
+            st["be_thr_now"] = baseline * 2.0
+            st["be_rise_now"] = br - baseline
+            # История настоящего баса: видно, есть ли в нём резкие удары.
+            brh = st.get("br_hist")
+            if brh is None or len(brh) != 120:
+                brh = st["br_hist"] = np.zeros(120, np.float32)
+            brh[1:] = brh[:-1]
+            brh[0] = br
         if not alive:
             flow = 0.0
             fast = 0.0
@@ -2336,7 +2389,20 @@ class Overlay(QWidget):
             # обрывался на середине. Теперь лишний выстрел просто не
             # вылетает, а старая частица спокойно догасает.
             if st["life"][i] > 0.0:
-                continue
+                if is_bass:
+                    # Места нет: буфер забит фоном (у пользователя 910 из 928
+                    # занято). Пучок при этом молча пропадал — а это ровно то,
+                    # что было: «на басу пучок не выскакивает».
+                    # Для пучка место ДЕЛАЕМ: он вытесняет самую старую
+                    # частицу. Кольцо буфера идёт от самой старой, так что
+                    # вытесняется та, что и так доживает свои доли секунды.
+                    st["punch_drop"] = st.get("punch_drop", 0) + 1
+                    st["life"][i] = 0.0
+                    st["y"][i] = 1e9
+                else:
+                    continue
+            if is_bass:
+                st["punch_ok"] = st.get("punch_ok", 0) + 1
             j = np.random.rand()
             # выбираем полосу по весу = высота спектра в ней; быстрые — по
             # весу = насколько полоса выросла, то есть летят из всплеска
@@ -2478,6 +2544,15 @@ class Overlay(QWidget):
         if dead.any():
             st["life"][dead] = 0.0
             st["y"][dead] = 1e9
+        # Счётчики пучка и заполненность буфера — наружу, чтобы «пучок не
+        # появляется» было видно по числам, а не по догадкам.
+        for k in ("punch_hits", "punch_req", "punch_ok", "punch_drop",
+                  "be_now", "be_avg_now", "be_thr_now", "be_rise_now"):
+            self._stat[k] = st.get(k, 0)
+        self._stat["br_hist"] = [round(float(v) * 1e6, 2)
+                                 for v in st.get("br_hist", np.zeros(0))[:50]]
+        self._stat["spark_alive"] = int((st["life"][:cap] > 0.0).sum())
+        self._stat["spark_cap"] = cap
 
     def draw_sparks(self, p, W, H, n, alpha):
         """Искры: пучком вылетают из одной точки на базовой линии, летят
