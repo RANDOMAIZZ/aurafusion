@@ -67,26 +67,40 @@ function mkSlider(c) {
   s.min = c.min; s.max = c.max; s.step = 1;
   well.append(s);
   w.append(well);
-  // div — на сколько делить показатель (0.55 хранится как 55 при div:100),
-  // mul — на сколько умножать (доля 1.0 хранится как 100 при mul:100).
-  // Раньше для области замера стоял div без mul, и ползунок «Ширина, %»
-  // показывал 1 вместо 100: в конфиге лежит доля, а шкала в процентах.
+  // Три разные величины, и раньше они были смешаны:
+  //
+  //   raw    — положение ползунка, целое от c.min до c.max;
+  //   stored — что лежит в конфиге: raw / div. Делитель нужен, когда в
+  //            конфиге доля, а шкала в процентах: ползунок «Ширина, %» с
+  //            div:100 хранит 0.5, а показывает 50;
+  //   shown  — что написано рядом с ползунком: stored * scale. Масштаб для
+  //            показа ТОЛЬКО: значение в конфиге от него не меняется. Нужен
+  //            там, где в конфиге доли, а человеку нужны проценты: порог
+  //            тишины 0.004 в конфиге и «0.4%» на экране — одна величина.
+  //
+  // Раньше mul делал и то и другое сразу: и в конфиг писалось умноженное
+  // значение, и показывалось оно же. Из-за этого ползунки области замера
+  // показывали 0 вместо 100, и при движении в конфиг попадало 50 вместо 0.5.
   const div = c.div || 1;
-  const mul = c.mul || 1;
+  const scale = c.scale || c.mul || 1;
   const paint = (raw) => {
-    const stored = raw / div * mul;
-    v.textContent = c.int ? String(Math.round(stored)) : stored.toFixed(2);
+    const stored = raw / div;
+    const shown = stored * scale;
+    v.textContent = c.int ? String(Math.round(shown)) : shown.toFixed(2);
     s.style.setProperty('--fill', ((raw - c.min) / (c.max - c.min) * 100) + '%');
   };
   const push = () => {
-    const out = s.value / div * mul;
+    const out = s.value / div;
     const patch = { [c.key]: c.int ? Math.round(out) : out };
-    if (c.onchange) c.onchange(out, s); else put(patch);
+    // Ключ — третьим аргументом: обработчику нужно знать, КАКОЙ ползунок
+    // двинулся. Раньше он получал (значение, элемент) и думал, что первое —
+    // это ключ: в конфиг уходил мусорный ключ «0.8» вместо color_rw.
+    if (c.onchange) c.onchange(out, s, c.key); else put(patch);
   };
   s.addEventListener('input', () => { paint(+s.value); push(); });
   s.addEventListener('change', () => { paint(+s.value); push(); });
   c.setValue = (stored) => {
-    s.value = Math.min(c.max, Math.max(c.min, Math.round(stored / mul * div)));
+    s.value = Math.min(c.max, Math.max(c.min, Math.round(stored * div)));
     paint(+s.value);
   };
   return w;
@@ -307,8 +321,14 @@ function onRegion(key) {
   REG_KEYS.forEach((k, i) => { patch[k] = vals[i]; });
   api.set(patch); sync('region');
 }
-function onRegionCustom(k, v) {
-  const patch = { [k]: Math.max(0, Math.min(1, v / 100)) };
+function onRegionCustom(v, el, k) {
+  // v — уже значение из конфига (доля 0..1): ползунок сам делит на div.
+  // Раньше здесь стояло ещё и деление на 100, и получалось двойное деление:
+  // 80 % превращались в 0.008 вместо 0.8, и область замера схлопывалась
+  // в ничто. А k — это ключ ползунка, его присылает сам ползунок третьим
+  // аргументом: по старинке обработчик брал первым аргументом «значение»,
+  // и в конфиг уходил мусорный ключ.
+  const patch = { [k]: Math.max(0, Math.min(1, v)) };
   if (CFG.color_region !== 'custom') {
     patch.color_region = 'custom'; CFG.color_region = 'custom';
     sync('regionSelect');
@@ -740,13 +760,13 @@ const PAGES = {
         ['Частицы', 'particles'], ['Искры', 'sparks'], ['Шарики', 'orbs'], ['Сетка', 'mesh'],
         ['Слои', 'stack'], ['Заливка', 'fill'], ['Лента', 'ribbon'],
         ['Круг', 'circle'], ['Дуга', 'arc'], ['Спираль', 'spiral'],
-        ['Кольца', 'radial'], ['Лучи', 'rays'], ['Бары+волна', 'combo']] },
+        ['Кольца', 'radial'], ['Лучи', 'rays'], ['Бары+волна', 'combo']], desc: 'Фигура, которой рисуется волна. У каждой свой набор настроек: у искр — размер и свечение частиц, у круглых — центр и радиус, у столбиков — высота и ширина полосы.' },
       { t: 'select', key: 'shape_color', label: 'Цвет фигур', desc: 'Бары, круг и прочие фигуры. Пока «Экран → ПК» выключен, берётся палитра.', options: [
         ['Как на экране', 'screen'], ['Палитра, подкрашенная экраном', 'tint'],
         ['Своя палитра', 'palette'] ] },
       { t: 'select', key: 'color_mode', label: 'Палитра', onchange: onCmode, options: [
-        ['Неон', 'neon'], ['Зелёный', 'green'], ['Огонь', 'fire'], ['Белый', 'white'], ['Свой...', 'custom']] },
-      { t: 'color', key: 'fill_color', label: 'Цвет волны (если экран выкл)', array: true },
+        ['Неон', 'neon'], ['Зелёный', 'green'], ['Огонь', 'fire'], ['Белый', 'white'], ['Свой...', 'custom']], desc: 'Набор цветов, из которых берётся цвет фигуры. Работает, когда «Цвет фигур» = «Своя палитра». «Свой…» открывает выбор одного цвета.' },
+      { t: 'color', key: 'fill_color', label: 'Цвет фигуры (если экран выкл)', array: true, desc: 'Цвет, которым рисуется фигура, когда авто-цвет с экрана выключен. В режиме «Как на экране» этот параметр не действует.' },
     ]},
     { g: 'Размер и положение', desc: 'Где стоит фигура и какого размера. У фигур на базовой линии — своя полоса по низу экрана, у круглых — центр и радиус.', items: [
       { t: 'slider', key: 'line_count', label: 'Количество линий', min: 8, max: 512, int: true, desc: 'Столбики у баров, спицы у круга, витки у спирали. У искр от этого же числа считается бюджет частиц: линии × 4, потолок 2048.' },
@@ -766,47 +786,47 @@ const PAGES = {
       { t: 'slider', key: 'spark_glow_start', label: 'Свечение снизу', min: 0, max: 100, div: 100, desc: 'С какой высоты ореол начинает гореть. 0 — с самой базовой линии.' },
       { t: 'slider', key: 'spark_glow_end', label: 'Свечение сверху', min: 0, max: 100, div: 100, desc: 'На какой высоте ореол гаснет. 100 — горит до самой вершины. Если «снизу» поднять выше, чем «сверху», искры внизу будут чистыми и загорятся только у верха.' },
       { t: 'slider', key: 'color_dark', label: 'Темнота цвета', min: 0, max: 100, div: 100, desc: 'Насколько цвета могут быть тёмными — и фигура, и подсветка ПК. 100 — как есть, строго тем же цветом, что определился с экрана. 0 — всегда ярко и насыщенно: ушедшие в темноту цвета поднимаются и очищаются. Серый и белый остаются серым и белым: насыщать нечего, и ранняя версия превращала серый кадр в бирюзовый. На тёмном видео при 0 видно, при 100 почти гаснет.' },
-      { t: 'slider', key: 'height_scale', label: 'Размер / высота', min: 1, max: 200, div: 100 },
-      { t: 'slider', key: 'fig_size', label: 'Размер фигуры', min: 20, max: 250, div: 100 },
-      { t: 'slider', key: 'viz_w', label: 'Ширина', min: 20, max: 100, div: 100 },
-      { t: 'slider', key: 'viz_x', label: 'X — по горизонтали', min: 0, max: 100, div: 100 },
-      { t: 'slider', key: 'viz_y', label: 'Y — по вертикали (низ экрана)', min: 2, max: 100, div: 100 },
-      { t: 'slider', key: 'fig_x', label: 'X — центр круглой фигуры', min: 0, max: 100, div: 100 },
-      { t: 'slider', key: 'fig_y', label: 'Y — центр круглой фигуры', min: 5, max: 95, div: 100 },
+      { t: 'slider', key: 'height_scale', label: 'Высота фигуры', min: 1, max: 200, div: 100, desc: 'Насколько высока фигура. У столбиков и волны — высота, у искр — высота полёта частиц. Раньше этот же ползунок задавал ещё и размер частицы; теперь размер отдельный.' },
+      { t: 'slider', key: 'fig_size', label: 'Размер фигуры', min: 20, max: 250, div: 100, desc: 'Общий множитель размера: увеличивает фигуру целиком, не меняя её форму. Размер частиц у искр от него не зависит.' },
+      { t: 'slider', key: 'viz_w', label: 'Ширина полосы', min: 20, max: 100, div: 100, desc: 'Ширина полосы, по которой бегут столбики. 100 — во весь экран, меньше — узкая полоса по центру.' },
+      { t: 'slider', key: 'viz_x', label: 'Сдвиг по горизонтали', min: 0, max: 100, div: 100, desc: 'Сдвиг полосы влево-вправо. Заметно, когда полоса уже экрана.' },
+      { t: 'slider', key: 'viz_y', label: 'Высота полосы над низом', min: 2, max: 100, div: 100, desc: 'Насколько высоко поднята полоса над нижним краем экрана. 100 — у самого низа, меньше — выше.' },
+      { t: 'slider', key: 'fig_x', label: 'Центр круглой фигуры: X', min: 0, max: 100, div: 100, desc: 'Горизонтальный центр для кругов, дуг, спиралей и колец.' },
+      { t: 'slider', key: 'fig_y', label: 'Центр круглой фигуры: Y', min: 5, max: 95, div: 100, desc: 'Вертикальный центр для кругов, дуг, спиралей и колец.' },
     ]},
     { g: 'Вид и прозрачность', desc: 'Яркость, заливка и сглаживание.', items: [
       { t: 'select', key: 'line_style', label: 'Линия', options: [
         ['Неон', 'neon'], ['Тонкая', 'thin'], ['Жирная', 'fat'], ['Двойная', 'double'],
         ['Пунктир', 'dash'], ['Градиент', 'gradient'], ['Точки', 'dotted'], ['Контур', 'outline'],
-        ['Ступени', 'steps'], ['Яркое ядро', 'megaglow']] },
-      { t: 'slider', key: 'line_width', label: 'Толщина линии', min: 1, max: 12, int: true },
-      { t: 'slider', key: 'alpha', label: 'Яркость линии', min: 40, max: 255, int: true },
-      { t: 'slider', key: 'fill_alpha', label: 'Заливка (прозрачность)', min: 0, max: 180, int: true },
-      { t: 'slider', key: 'wave_ceiling', label: 'Потолок амплитуды', min: 10, max: 100, div: 100 },
-      { t: 'check', key: 'mirror', label: 'Зеркало вверх+вниз' },
+        ['Ступени', 'steps'], ['Яркое ядро', 'megaglow']], desc: 'Как нарисована линия: неон, тонкая, жирная, двойная, пунктир, градиент, точки, контур, ступени, яркое ядро. Видно на столбиках и на волне.' },
+      { t: 'slider', key: 'line_width', label: 'Толщина линии', min: 1, max: 12, int: true, desc: 'Толщина линии в пикселях. Заметно на тонких фигурах и на контуре.' },
+      { t: 'slider', key: 'alpha', label: 'Яркость линии', min: 40, max: 255, int: true, desc: 'Прозрачность самой линии, 40–255. На цвет картинки под собой не влияет.' },
+      { t: 'slider', key: 'fill_alpha', label: 'Заливка (прозрачность)', min: 0, max: 180, int: true, desc: 'Плотность заливки фигуры. Работает у волны, заливки и ленты.' },
+      { t: 'slider', key: 'wave_ceiling', label: 'Потолок амплитуды', min: 10, max: 100, div: 100, desc: 'Ограничивает, насколько высоко может подняться волна. На максимуме волна упирается в потолок и выше не идёт.' },
+      { t: 'check', key: 'mirror', label: 'Зеркало вверх+вниз', desc: 'Рисовать фигуру симметрично вверх и вниз от базовой линии.' },
     ]},
     { g: 'Прозрачность и экран', desc: 'Насколько оверлей заметен и что он делает с картинкой под собой.', items: [
-      { t: 'slider', key: 'overlay_opacity', label: 'Прозрачность оверлея', min: 10, max: 100, div: 100 },
-      { t: 'slider', key: 'vignette', label: 'Виньетка (0 = выкл)', min: 0, max: 100, div: 100 },
-      { t: 'slider', key: 'bg_dim', label: 'Затемнение экрана', min: 0, max: 60, div: 100 },
-      { t: 'slider', key: 'dim_pulse', label: 'Затемнение в такт', min: 0, max: 60, div: 100 },
-      { t: 'slider', key: 'flash', label: 'Вспышка в такт', min: 0, max: 100, div: 100 },
-      { t: 'slider', key: 'shake', label: 'Тряска в такт', min: 0, max: 100, div: 100 },
-      { t: 'slider', key: 'zoom', label: 'Зум в такт', min: 0, max: 100, div: 100 },
+      { t: 'slider', key: 'overlay_opacity', label: 'Прозрачность оверлея', min: 10, max: 100, div: 100, desc: 'Насколько оверлей виден поверх картинки. 10 — еле заметен, 100 — непрозрачный.' },
+      { t: 'slider', key: 'vignette', label: 'Виньетка (0 = выкл)', min: 0, max: 100, div: 100, desc: 'Затемнение по краям экрана, как в кино. 0 — выключено.' },
+      { t: 'slider', key: 'bg_dim', label: 'Затемнение экрана', min: 0, max: 60, div: 100, desc: 'Постоянное затемнение поверх всей картинки, независимо от музыки.' },
+      { t: 'slider', key: 'dim_pulse', label: 'Затемнение в такт', min: 0, max: 60, div: 100, desc: 'Дополнительное затемнение, которое качается в такт музыке. Складывается с постоянным затемнением.' },
+      { t: 'slider', key: 'flash', label: 'Вспышка в такт', min: 0, max: 100, div: 100, desc: 'Вспышка цветом экрана поверх картинки в такт басу.' },
+      { t: 'slider', key: 'shake', label: 'Тряска в такт', min: 0, max: 100, div: 100, desc: 'Тряска фигуры в такт музыке.' },
+      { t: 'slider', key: 'zoom', label: 'Зум в такт', min: 0, max: 100, div: 100, desc: 'Фигура на мгновение увеличивается в такт музыке.' },
     ]},
     { g: 'Сила реакции', desc: 'Насколько фигура живо реагирует на бас.', items: [
-      { t: 'slider', key: 'beat_strength', label: 'Сила пульса', min: 0, max: 100, div: 100 },
-      { t: 'check', key: 'beat_pulse', label: 'Пульс от баса' },
+      { t: 'slider', key: 'beat_strength', label: 'Сила пульса', min: 0, max: 100, div: 100, desc: 'Насколько сильно фигура пульсирует. Работает только вместе с галочкой «Пульс от баса».' },
+      { t: 'check', key: 'beat_pulse', label: 'Пульс от баса', desc: 'Включает пульсацию фигуры по басу. Без этой галочки «Сила пульса» не действует.' },
     ]},
     { g: 'SYS — лупа всего экрана', desc: 'Через Magnification API: приближает и трясёт ВЕСЬ экран, а не только оверлей. Не работает в Exclusive Fullscreen. При выключении экран возвращается.', items: [
-      { t: 'check', key: 'sys_fx', label: 'Приближение/тряска ВСЕГО экрана' },
+      { t: 'check', key: 'sys_fx', label: 'Приближение/тряска ВСЕГО экрана', desc: 'Через Magnification API приближает и трясёт ВЕСЬ экран, а не только оверлей. Не работает в Exclusive Fullscreen — игра в таком режиме экран не отдаёт.' },
       { t: 'select', key: 'sys_mode', label: 'Режим', options: [
-        ['К центру', 'center'], ['По углам', 'corners']] },
-      { t: 'slider', key: 'sys_zoom', label: 'SYS-приближение', min: 0, max: 100, div: 100 },
-      { t: 'slider', key: 'sys_shake', label: 'SYS-тряска', min: 0, max: 100, div: 100 },
+        ['К центру', 'center'], ['По углам', 'corners']], desc: 'Куда наклоняется приближение: к центру экрана или по углам.' },
+      { t: 'slider', key: 'sys_zoom', label: 'SYS-приближение', min: 0, max: 100, div: 100, desc: 'Сила приближения всего экрана.' },
+      { t: 'slider', key: 'sys_shake', label: 'SYS-тряска', min: 0, max: 100, div: 100, desc: 'Сила тряски всего экрана.' },
     ]},
     { g: 'Запуск', desc: 'AuraFusion будет запускаться сам при входе в Windows. Браузер при этом не открывается — панель всегда на http://127.0.0.1:8765/, значок появляется в трее.', items: [
-      { t: 'check', key: 'autostart', label: 'Запускать вместе с Windows', onchange: onAutostart },
+      { t: 'check', key: 'autostart', label: 'Запускать вместе с Windows', onchange: onAutostart, desc: 'При входе в Windows AuraFusion поднимется сам, без окна браузера. Панель всегда на http://127.0.0.1:8765/, значок появляется в трее.' },
     ]},
   ],
 
@@ -814,94 +834,101 @@ const PAGES = {
     { g: 'Устройства подсветки', desc: 'OpenRGB-устройства и BLE-ленты — одним списком. ● включено, ○ выключено.', items: [
       { t: 'devs' },
       { t: 'buttons', items: [
-        { t: 'button', label: '↻ Найти устройства', action: 'refresh_devices', toast: 'ищу устройства…' },
-        { t: 'button', label: 'Тест цвета 4с', action: 'test_color', toast: 'тест 4с' },
-        { t: 'button', label: '⟳ Дёрнуть режим', action: 'kick_mode', toast: 'дёрнул режим' },
+        { t: 'button', label: '↻ Найти устройства', action: 'refresh_devices', toast: 'ищу устройства…', desc: 'Пересканировать USB и BLE. Нужно, если ленту подключили после запуска.' },
+        { t: 'button', label: 'Тест цвета 4с', action: 'test_color', toast: 'тест 4с', desc: 'Включает подсветку на 4 секунды ярким белым — проверить, что лента вообще горит.' },
+        { t: 'button', label: '⟳ Дёрнуть режим', action: 'kick_mode', toast: 'дёрнул режим', desc: 'Переключает режим контроллера в свежий — помогает, если лента зависла и не меняет цвет.' },
       ]},
+      { t: 'slider', key: 'ble_max_fps', label: 'FPS BLE-ленты', min: 1, max: 60, int: true, desc: 'Потолок частоты обновления BLE-ленты. По GATT выше 20 раз в секунду не передать — лента всё равно не успеет, а USB будет занят.' },
+      { t: 'slider', key: 'reassert_min', label: 'Пауза до переподключения (с)', min: 0, max: 60, int: true, desc: 'Минимальный интервал между повторными попытками вернуть BLE-ленту, если связь отвалилась. 0 — пробовать при каждом обновлении.' },
     ]},
     { g: 'Цвет', desc: 'Откуда ПК берёт цвет и как его доводить.', items: [
       { t: 'select', key: 'rgb_mode', label: 'Режим ПК', wide: true, options: [
         ['Микс: цвет экран + пульс музыка', 'mix'],
-        ['Только экран', 'screen'], ['Только музыка', 'music']] },
-      { t: 'check', key: 'follow_screen', label: 'Авто-цвет под экран', onchange: onFollow, id: 'followRgb' },
-      { t: 'slider', key: 'rgb_saturation', label: 'Насыщенность авто-цвета', min: 0, max: 150, div: 100, onchange: onSat, id: 'satRgb' },
+        ['Только экран', 'screen'], ['Только музыка', 'music']], desc: 'Откуда ПК берёт цвет: микс цвета экрана и пульса музыки, только экран или только музыка.' },
+      { t: 'check', key: 'follow_screen', label: 'Авто-цвет под экран', onchange: onFollow, id: 'followRgb', desc: 'ПК берёт цвет с экрана. Выключено — берёт из «Статичного цвета».' },
+      { t: 'slider', key: 'rgb_saturation', label: 'Насыщенность', min: 0, max: 150, div: 100, onchange: onSat, id: 'satRgb', desc: 'Насколько цвет ПК насыщенный. 100 — как на экране, больше — ярче и сочнее.' },
       { t: 'slider', key: 'color_dark', label: 'Темнота цвета', min: 0, max: 100, div: 100, desc: 'Ограничение снизу на то, насколько тёмным может быть цвет. 100 — строго цвет с экрана, 0 — всегда ярко и насыщенно. Тот же параметр, что и у фигуры на странице «Визуал».' },
-      { t: 'slider', key: 'dark_threshold', label: 'Порог темноты (0 = выкл)', min: 0, max: 255, int: true },
-      { t: 'slider', key: 'rgb_gain_r', label: 'Баланс R', min: 30, max: 150, div: 100 },
-      { t: 'slider', key: 'rgb_gain_g', label: 'Баланс G', min: 30, max: 150, div: 100 },
-      { t: 'slider', key: 'rgb_gain_b', label: 'Баланс B', min: 30, max: 150, div: 100 },
-      { t: 'color', key: 'static_color', label: 'Статичный цвет (режим Музыка)' },
-      { t: 'check', key: 'color_all', label: 'Один цвет на все устройства' },
-      { t: 'check', key: 'rgb_enabled', label: 'Подсветка ПК включена' },
+      { t: 'slider', key: 'dark_threshold', label: 'Порог темноты (0 = выкл)', min: 0, max: 255, int: true, desc: 'Цвета темнее этого порога ПК не показывает — держится предыдущий. Поднимается, если ночью цвета уходят в темноту и подсветка гаснет.' },
+      { t: 'slider', key: 'rgb_gain_r', label: 'Баланс R', min: 30, max: 150, div: 100, desc: 'Правка красного канала. Если подсветка уходит в розовый или зелёный, крутите здесь.' },
+      { t: 'slider', key: 'rgb_gain_g', label: 'Баланс G', min: 30, max: 150, div: 100, desc: 'Правка зелёного канала.' },
+      { t: 'slider', key: 'rgb_gain_b', label: 'Баланс B', min: 30, max: 150, div: 100, desc: 'Правка синего канала.' },
+      { t: 'color', key: 'static_color', label: 'Статичный цвет (режим Музыка)', desc: 'Цвет, который ПК держит без экрана: в режиме «Только музыка» и когда авто-цвет выключен.' },
+      { t: 'check', key: 'color_all', label: 'Один цвет на все устройства', desc: 'Все устройства показывают один и тот же цвет вместо своей раскраски по зонам.' },
+      { t: 'check', key: 'rgb_enabled', label: 'Подсветка ПК включена', desc: 'Главный выключатель подсветки. Выключишь — погаснут все устройства сразу.' },
     ]},
     { g: 'Пульс от баса', desc: 'Яркость ПК качается музыкой: импульс, атака, затухание, границы.', items: [
-      { t: 'slider', key: 'pulse_threshold', label: 'Порог импульса', min: 0, max: 50, div: 100 },
-      { t: 'slider', key: 'pulse_gain', label: 'Усиление импульса', min: 20, max: 300, div: 100 },
-      { t: 'slider', key: 'attack_s', label: 'Атака (с)', min: 1, max: 30, div: 100 },
-      { t: 'slider', key: 'release_s', label: 'Затухание (с)', min: 5, max: 150, div: 100 },
-      { t: 'slider', key: 'min_brightness', label: 'Мин. яркость', min: 0, max: 50, div: 100 },
-      { t: 'slider', key: 'max_brightness', label: 'Макс. яркость', min: 20, max: 100, div: 100 },
-      { t: 'slider', key: 'bass_boost', label: 'Усиление баса', min: 30, max: 300, div: 100 },
+      { t: 'slider', key: 'pulse_threshold', label: 'Порог импульса', min: 0, max: 50, div: 100, desc: 'С какой громкости баса начинается импульс. Ниже порога ПК только качается в такт, но не вспыхивает.' },
+      { t: 'slider', key: 'pulse_gain', label: 'Усиление импульса', min: 20, max: 300, div: 100, desc: 'Насколько сильно вспыхивает ПК на импульсе.' },
+      { t: 'slider', key: 'attack_s', label: 'Атака (с)', min: 1, max: 30, div: 100, desc: 'За сколько секунд яркость набирается. Меньше — вспышка резче.' },
+      { t: 'slider', key: 'release_s', label: 'Затухание (с)', min: 5, max: 150, div: 100, desc: 'За сколько секунд яркость падает обратно. Меньше — вспышка короче.' },
+      { t: 'slider', key: 'min_brightness', label: 'Мин. яркость', min: 0, max: 50, div: 100, desc: 'Ниже этого уровня подсветка не гаснет совсем: на тихой музыке ПК всё равно чуть светится.' },
+      { t: 'slider', key: 'max_brightness', label: 'Макс. яркость', min: 20, max: 100, div: 100, desc: 'Потолок яркости. Ниже — подсветка никогда не выкручивается на полную.' },
+      { t: 'slider', key: 'bass_boost', label: 'Усиление баса', min: 30, max: 300, div: 100, desc: 'Насколько сильно подсветка реагирует на низкие частоты.' },
+      { t: 'slider', key: 'abs_floor', label: 'Порог тишины, %', min: 0, max: 100, div: 1000, scale: 100, desc: 'Ниже этой громкости музыка считается тишиной, и подсветка держит минимальную яркость, а не пульсирует. Поднимается, если подсветка дёргается на тихих местах.' },
+      { t: 'slider', key: 'gamma', label: 'Кривая импульса', min: 10, max: 400, div: 100, desc: 'Форма вспышки. Ниже 1 — резкая и короткая, выше 1 — мягкая и широкая. При 1 — обычная плавная вспышка.' },
+      { t: 'slider', key: 'idle_fps', label: 'FPS в простое', min: 1, max: 30, int: true, desc: 'Сколько раз в секунду обновляется подсветка, когда цвет не меняется. На тишине этого достаточно, а USB не греется.' },
     ]},
   ],
 
   amb: [
     { g: 'Замер цвета', desc: 'ПК берёт ТОТ ЖЕ сочный цвет, что и волна оверлея. Скрин 96×54 каждые 0.5 с → самый насыщенный цвет → плавно на железо.', items: [
       { t: 'select', key: 'color_monitor', label: 'Монитор замера', wide: true, dynamic: 'colormon',
-        mini: refreshMonitors, options: [] },
+        mini: refreshMonitors, options: [], desc: 'С какого монитора берётся цвет. По умолчанию — тот, где нарисован оверлей.' },
       { t: 'select', key: 'color_region', label: 'Область замера', wide: true, id: 'regionSel', onchange: onRegion,
-        options: [['Весь экран', 'full'], ['Центр', 'center'], ['Верх', 'top'], ['Низ', 'bottom'], ['Своя...', 'custom']] },
-      { t: 'slider', key: 'color_rx', label: 'Область X, %', min: 0, max: 100, int: true, mul: 100, onchange: onRegionCustom },
-      { t: 'slider', key: 'color_ry', label: 'Область Y, %', min: 0, max: 100, int: true, mul: 100, onchange: onRegionCustom },
-      { t: 'slider', key: 'color_rw', label: 'Область Ширина, %', min: 0, max: 100, int: true, mul: 100, onchange: onRegionCustom },
-      { t: 'slider', key: 'color_rh', label: 'Область Высота, %', min: 0, max: 100, int: true, mul: 100, onchange: onRegionCustom },
+        options: [['Весь экран', 'full'], ['Центр', 'center'], ['Верх', 'top'], ['Низ', 'bottom'], ['Своя...', 'custom']], desc: 'Какая часть экрана смотрится. «Центр» обычно лучше: в центре видео, по краям рамки и панель задач.' },
+      { t: 'slider', key: 'color_rx', label: 'Область X, %', min: 0, max: 100, int: true, div: 100, scale: 100, onchange: onRegionCustom, desc: 'Своя область: отступ слева, в процентах ширины экрана.' },
+      { t: 'slider', key: 'color_ry', label: 'Область Y, %', min: 0, max: 100, int: true, div: 100, scale: 100, onchange: onRegionCustom, desc: 'Своя область: отступ сверху, в процентах высоты экрана.' },
+      { t: 'slider', key: 'color_rw', label: 'Область Ширина, %', min: 0, max: 100, int: true, div: 100, scale: 100, onchange: onRegionCustom, desc: 'Своя область: ширина в процентах ширины экрана.' },
+      { t: 'slider', key: 'color_rh', label: 'Область Высота, %', min: 0, max: 100, int: true, div: 100, scale: 100, onchange: onRegionCustom, desc: 'Своя область: высота в процентах высоты экрана.' },
     ]},
     { g: 'Ambilight: экран → ПК', desc: 'Как быстро и какой цвет ПК принимает от экрана.', items: [
-      { t: 'check', key: 'follow_screen', label: 'ПК следует за экраном', onchange: onFollow, id: 'followAmb' },
-      { t: 'check', key: 'exclude_viz', label: 'Не учитывать волну при замере' },
+      { t: 'check', key: 'follow_screen', label: 'ПК следует за экраном', onchange: onFollow, id: 'followAmb', desc: 'ПК берёт цвет с экрана. Выключено — берёт из «Статичного цвета».' },
+      { t: 'check', key: 'exclude_viz', label: 'Не учитывать волну при замере', desc: 'Вырезает из кадра саму волну оверлея. Иначе оверлей меряет сам себя и цвет гуляет.' },
       { t: 'check', key: 'panel_blocks', label: 'Панель во весь экран мешает замеру', desc: 'Выключено — цвет берётся с того, что на экране, включая саму панель. Включено — при панели во весь экран замер встаёт и держится последний цвет.' },
       { t: 'slider', key: 'color_sample_ms', label: 'Как часто мерить экран, мс', min: 33, max: 1000, int: true, desc: 'Сколько миллисекунд между снятиями кадра. Это и есть отклик: цвет не может смениться быстрее, чем придёт следующий кадр. Снимок стоит 33 мс, так что ниже 33 смысла нет, а чаще 60 съедает заметную долю процессора. Съёмка идёт в отдельном потоке, поэтому короткий интервал не рвёт отрисовку.' },
-      { t: 'slider', key: 'auto_speed', label: 'Скорость подтяжки к экрану', min: 5, max: 100, div: 100 },
-      { t: 'slider', key: 'rgb_saturation', label: 'Насыщенность ПК', min: 0, max: 150, div: 100, onchange: onSat, id: 'satAmb' },
-      { t: 'slider', key: 'color_hold', label: 'Держать цвет, замеров', min: 1, max: 6, int: true },
-      { t: 'slider', key: 'color_speed', label: 'Скорость перехода цвета', min: 2, max: 50, div: 100 },
+      { t: 'slider', key: 'auto_speed', label: 'Скорость подтяжки к экрану', min: 5, max: 100, div: 100, desc: 'Как быстро новый цвет догоняет старый. 100 — мгновенно, и на резких сценах цвет дёргается.' },
+      { t: 'slider', key: 'rgb_saturation', label: 'Насыщенность', min: 0, max: 150, div: 100, onchange: onSat, id: 'satAmb', desc: 'Насколько цвет ПК насыщенный. 100 — как на экране, больше — ярче и сочнее.' },
+      { t: 'slider', key: 'color_hold', label: 'Держать цвет, замеров', min: 1, max: 6, int: true, desc: 'Сколько замеров подряд новый оттенок должен удержаться, чтобы сменить цвет. Больше — меньше дёрганий, но реакция медленнее.' },
+      { t: 'slider', key: 'color_speed', label: 'Скорость перехода цвета', min: 2, max: 50, div: 100, desc: 'Плавность перехода между цветами. 50 — половина пути за один кадр, меньше — мягче и дольше.' },
       { t: 'select', key: 'color_fx', label: 'Эффект смены', options: [
         ['Плавный', 'smooth'], ['Мгновенный (быстрее всех)', 'instant'], ['Радуга', 'rainbow'],
-        ['Дыхание', 'breathe'], ['Пульс от баса', 'beat']] },
+        ['Дыхание', 'breathe'], ['Пульс от баса', 'beat']], desc: 'Как ведёт себя цвет при смене: плавно, мгновенно, радугой, дыханием или пульсом от баса.' },
       { t: 'select', key: 'color_algo', label: 'Алгоритм цвета', options: [
-        ['Сочный (точный оттенок)', 'juicy'], ['Средний (плавный)', 'average'], ['K-means (3 кластера)', 'kmeans']] },
+        ['Сочный (точный оттенок)', 'juicy'], ['Средний (плавный)', 'average'], ['K-means (3 кластера)', 'kmeans']], desc: 'Как из кадра выбирается главный цвет. «Сочный» — точный оттенок, «Средний» — усреднённый и мягкий, «K-means» — три кластера, обычно точнее на смешанных сценах.' },
     ]},
   ],
 
   snd: [
     { g: 'Захват звука', desc: 'Общий движок pyaudiowpatch: один захват на оверлей и на подсветку.', items: [
       { t: 'select', key: 'audio_device', label: 'Источник', wide: true, dynamic: 'audio',
-        onchange: onAudio, mini: refreshAudio, options: [['Системный вывод (авто)', '']] },
+        onchange: onAudio, mini: refreshAudio, options: [['Системный вывод (авто)', '']], desc: 'Откуда берётся звук для анализа. Обычно это системный вывод, чтобы слышать ровно то, что играет.' },
       { t: 'buttons', items: [
-        { t: 'button', label: '⟳ Перезапустить захват звука', action: 'restart_audio', toast: 'перезапускаю захват…' },
+        { t: 'button', label: '⟳ Перезапустить захват звука', action: 'restart_audio', toast: 'перезапускаю захват…', desc: 'Пересоздать захват системного вывода. Помогает, если звук перестал ловиться.' },
       ]},
       { t: 'hint', id: 'lblIn', text: 'Вход: —' },
-      { t: 'check', key: 'demo', label: 'Демо-сигнал (если нет музыки)' },
+      { t: 'check', key: 'demo', label: 'Демо-сигнал (если нет музыки)', desc: 'Если музыки нет, оверлей рисует на тестовом сигнале — так можно посмотреть настройки без музыки.' },
     ]},
     { g: 'Чувствительность', desc: 'Как громко и детально волна реагирует на музыку.', items: [
-      { t: 'slider', key: 'sensitivity', label: 'Чувствительность', min: 20, max: 300, div: 100 },
-      { t: 'slider', key: 'dynamics', label: 'Динамика', min: 100, max: 300, div: 100 },
-      { t: 'slider', key: 'bass_gain', label: 'Бас', min: 0, max: 200, div: 100 },
-      { t: 'slider', key: 'mid_gain', label: 'Середина', min: 0, max: 250, div: 100 },
-      { t: 'slider', key: 'treble_gain', label: 'Верха', min: 0, max: 300, div: 100 },
-      { t: 'slider', key: 'bars', label: 'Полос', min: 16, max: 128, int: true },
-      { t: 'check', key: 'auto_balance', label: 'Автобаланс (двигается вся волна)' },
+      { t: 'slider', key: 'sensitivity', label: 'Чувствительность', min: 20, max: 300, div: 100, desc: 'Общая громкость реакции. Поднимается, если волна еле шевелится.' },
+      { t: 'slider', key: 'dynamics', label: 'Динамика', min: 100, max: 300, div: 100, desc: 'Насколько тихие звуки слышны в волне. Выше — больше деталей, но и больше шума.' },
+      { t: 'slider', key: 'bass_gain', label: 'Бас', min: 0, max: 200, div: 100, desc: 'Усиление низких частот в спектре.' },
+      { t: 'slider', key: 'mid_gain', label: 'Середина', min: 0, max: 250, div: 100, desc: 'Усиление средних частот в спектре.' },
+      { t: 'slider', key: 'treble_gain', label: 'Верха', min: 0, max: 300, div: 100, desc: 'Усиление верхних частот в спектре.' },
+      { t: 'slider', key: 'bars', label: 'Полос', min: 16, max: 128, int: true, desc: 'Сколько полос в спектре. Больше — детальнее, но и дороже по кадру.' },
+      { t: 'check', key: 'auto_balance', label: 'Автобаланс (двигается вся волна)', desc: 'Каждая треть спектра приводится к своему недавнему пику, чтобы тихие частоты не пропадали. Без автобаланса громкая часть забивает остальное.' },
+      { t: 'slider', key: 'avg_s', label: 'Усреднение громкости (с)', min: 5, max: 6000, div: 100, desc: 'За сколько секунд усредняется громкость — по этой средней считается, во сколько раз музыка громче обычного. Больше — «обычный» уровень отстаёт, и вспышки выходят неравномерными.' },
+      { t: 'slider', key: 'chunk', label: 'Размер блока звука', min: 512, max: 4096, int: true, desc: 'Сколько звука берётся за раз. Больше — точнее низкие частоты, но и задержка больше. Менять имеет смысл только если что-то конкретное не работает.' },
     ]},
   ],
 
   sys: [
     { g: 'Оверлей', desc: 'Производительность и положение волны на рабочем столе.', items: [
       { t: 'select', key: 'overlay_fps', label: 'FPS оверлея', isInt: true, options: [
-        ['30 (эко)', '30'], ['60 (баланс)', '60'], ['120 (плавно)', '120']] },
+        ['30 (эко)', '30'], ['60 (баланс)', '60'], ['120 (плавно)', '120']], desc: 'Сколько кадров в секунду рисует оверлей. 60 — баланс, 120 — плавнее, но дороже по процессору.' },
       { t: 'select', key: 'monitor', label: 'Монитор оверлея', dynamic: 'ovmon',
-        onchange: onOvMon, mini: refreshMonitors, options: [] },
-      { t: 'slider', key: 'rgb_fps', label: 'FPS подсветки ПК', min: 1, max: 60, int: true },
-      { t: 'slider', key: 'startup_delay_s', label: 'Пауза перед автостартом (с)', min: 0, max: 180, int: true },
+        onchange: onOvMon, mini: refreshMonitors, options: [], desc: 'На каком мониторе нарисован оверлей.' },
+      { t: 'slider', key: 'rgb_fps', label: 'FPS подсветки ПК', min: 1, max: 60, int: true, desc: 'Сколько раз в секунду обновляется подсветка. Выше — быстрее реагирует, но больше нагрузки на USB.' },
+      { t: 'slider', key: 'startup_delay_s', label: 'Пауза перед автостартом (с)', min: 0, max: 180, int: true, desc: 'Сколько секунд подождать после старта Windows, прежде чем поднимать оверлей. Полезно, если система ещё грузится и звук ещё не готов.' },
     ]},
     { g: 'Сцены', desc: 'Наборы настроек под то, что вы делаете. Одно нажатие переносит сразу всё: режим цвета, силу эффектов, прозрачность оверлея.', items: [
       { t: 'scenes' },
@@ -914,17 +941,17 @@ const PAGES = {
       { t: 'catalog' },
     ]},
     { g: 'Поведение', desc: 'Не мешать играм и не грузить железо на старте.', items: [
-      { t: 'check', key: 'click_through', label: 'Клики сквозь', onchange: v => onSysCheck('click_through', v) },
-      { t: 'check', key: 'always_on_top', label: 'Оверлей всегда поверх', onchange: v => onSysCheck('always_on_top', v) },
+      { t: 'check', key: 'click_through', label: 'Клики сквозь', onchange: v => onSysCheck('click_through', v), desc: 'Оверлей не перехватывает мышь: кликайте по нему как по обычному экрану.' },
+      { t: 'check', key: 'always_on_top', label: 'Оверлей всегда поверх', onchange: v => onSysCheck('always_on_top', v), desc: 'Оверлей рисуется поверх всех окон, включая игры в обычном (не эксклюзивном) режиме.' },
       { t: 'check', key: 'avoid_taskbar', label: 'Не залезать на панель задач', onchange: v => onSysCheck('avoid_taskbar', v), desc: 'На автоскрытии панель выезжает под оверлей и кажется, что не поднялась.' },
-      { t: 'check', key: 'auto_hide', label: 'Прятать волну в тишине', onchange: v => onSysCheck('auto_hide', v) },
-      { t: 'check', key: 'autostart', label: 'Запуск с Windows', onchange: v => onSysCheck('autostart', v) },
-      { t: 'check', key: 'autosave', label: 'Автосохранение', onchange: v => onSysCheck('autosave', v) },
+      { t: 'check', key: 'auto_hide', label: 'Прятать волну в тишине', onchange: v => onSysCheck('auto_hide', v), desc: 'Когда музыки нет, волна исчезает, чтобы не мешать.' },
+      { t: 'check', key: 'autostart', label: 'Запуск с Windows', onchange: v => onSysCheck('autostart', v), desc: 'При входе в Windows AuraFusion поднимется сам, без окна браузера. Панель всегда на http://127.0.0.1:8765/, значок появляется в трее.' },
+      { t: 'check', key: 'autosave', label: 'Автосохранение', onchange: v => onSysCheck('autosave', v), desc: 'Сохранять настройки самим, без кнопки. Выключите, если меняете ползунки вручную и не хотите их терять.' },
     ]},
     { g: 'Профиль', desc: 'Настройки лежат в fusion_config.json и грузятся сами при старте.', items: [
       { t: 'buttons', items: [
-        { t: 'button', label: '💾 Сохранить', action: 'save', toast: 'Сохранено ✓' },
-        { t: 'button', label: 'Выход', action: 'quit', toast: 'выхожу…' },
+        { t: 'button', label: '💾 Сохранить', action: 'save', toast: 'Сохранено ✓', desc: 'Записать настройки в файл. Обычно не нужно: при «Автосохранении» всё пишется само.' },
+        { t: 'button', label: 'Выход', action: 'quit', toast: 'выхожу…', desc: 'Закрыть AuraFusion целиком: и оверлей, и подсветку. Панель в браузере останется, но станет бесполезной.' },
       ]},
       { t: 'hint', id: 'lblConf', text: 'Настройки грузятся сами при старте.' },
     ]},
@@ -948,12 +975,18 @@ function buildControl(c) {
   if (c.t === 'buttons') {
     const row = el('div', 'btnrow');
     for (const b of c.items) {
+      // Пояснение живёт под кнопкой, в той же ячейке: отдельным текстом
+      // оно читалось как «просто текст», и к какой кнопке относится —
+      // неясно.
+      const cell = el('div', 'btncell');
       const btn = el('button', 'btn' + (b.cls ? ' ' + b.cls : ''), b.label);
       btn.addEventListener('click', async () => {
         await api.act(b.action);
         toast(b.toast || 'готово');
       });
-      row.append(btn);
+      cell.append(btn);
+      if (b.desc) cell.append(el('div', 'btnhint', b.desc));
+      row.append(cell);
     }
     return row;
   }
@@ -967,12 +1000,38 @@ function buildControl(c) {
   c._node = node;
   if (c.id) { CTLS[c.id] = c; node.id = c.id; }
   if (c.span2 || c.wide) node.style.gridColumn = '1 / -1';
+  // Пояснение под плиткой. Раньше desc был прописан в настройках, но
+  // нигде не выводился: в панели было 106 кнопок и ноль объяснений, что
+  // они делают. Текст всегда в DOM (он же подсказка при наведении),
+  // а показывается он по общему переключателю «Пояснения» — иначе панель
+  // превращается в стену текста.
+  if (node && node.classList && node.classList.contains('tile') && c.desc) {
+    const d = el('div', 'tdesc', c.desc);
+    node.append(d);
+    node.title = c.desc;
+  }
   return node;
 }
 
 function buildPage(key) {
   const page = el('div', 'page');
   page.dataset.page = key;
+  // Переключатель пояснений. По умолчанию включён: без него половина
+  // настроек выглядит как загадка, а названия («Порог импульса»,
+  // «Базовая линия») ничего не объясняют.
+  const top = el('div', 'exprow');
+  const sw = el('label', 'expwrap');
+  const cbx = el('input');
+  cbx.type = 'checkbox';
+  cbx.checked = localStorage.getItem('aura.expl') !== '0';
+  sw.append(cbx, el('span', null, 'Показывать пояснения'));
+  cbx.addEventListener('change', () => {
+    localStorage.setItem('aura.expl', cbx.checked ? '1' : '0');
+    document.body.classList.toggle('expl', cbx.checked);
+  });
+  top.append(sw);
+  page.append(top);
+  document.body.classList.toggle('expl', cbx.checked);
   for (const sec of PAGES[key]) {
     const s = el('section', 'sec');
     const head = el('div', 'sechead');
