@@ -295,11 +295,9 @@ body.expl .tdesc{display:block;}
 /* к чему привязан поповер */
 .tile,.dd{position:relative;}
 /* переключатель пояснений в шапке страницы */
-.exprow{grid-column:1 / -1;display:flex;justify-content:flex-end;margin-bottom:-6px;}
-.exprow .expwrap{display:flex;align-items:center;gap:7px;font-size:11.5px;
-  color:var(--dim);cursor:pointer;user-select:none;}
-.exprow input[type=checkbox]{accent-color:var(--accent,#4fd2ff);width:14px;height:14px;cursor:pointer;}
-.exprow input[type=checkbox]:hover{accent-color:var(--accent,#4fd2ff);}
+.exprow{grid-column:1 / -1;display:flex;justify-content:flex-end;margin-bottom:-2px;}
+.exprow .sw{gap:9px;}
+.exprow .lbl{font-size:11.5px;color:var(--muted);}
 /* сцены: плитки чуть ниже и уже, чтобы читались как переключатель режимов,
    а не как основные кнопки панели */
 .scenes{grid-column:1 / -1;}

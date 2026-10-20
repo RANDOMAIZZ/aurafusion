@@ -1076,11 +1076,13 @@ function buildPage(key) {
   // тех, кому нужно прочитать всё подряд. По умолчанию выключен: с текстом
   // под каждым из 93 ползунков панель превращается в стену.
   const top = el('div', 'exprow');
-  const sw = el('label', 'expwrap');
+  const sw = el('label', 'sw');
   const cbx = el('input');
   cbx.type = 'checkbox';
   cbx.checked = localStorage.getItem('aura.expl') === '1';
-  sw.append(cbx, el('span', null, 'Показать все пояснения'));
+  const track = el('span', 'track');
+  track.append(el('span', 'knob'));
+  sw.append(cbx, track, el('span', 'lbl', 'Показать все пояснения'));
   cbx.addEventListener('change', () => {
     localStorage.setItem('aura.expl', cbx.checked ? '1' : '0');
     document.body.classList.toggle('expl', cbx.checked);
