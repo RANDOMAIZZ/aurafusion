@@ -23,4 +23,7 @@ Thumbs.db
 .venv/
 venv/
 .overlay_shots/
+# резервная копия конфига: рядом с основным, чтобы пережить его порчу
+fusion_config.json.bak
+fusion_config.json.tmp
 .playwright-mcp/

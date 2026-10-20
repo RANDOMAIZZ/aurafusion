@@ -194,12 +194,33 @@ FLOAT_KEYS = {
 STR_KEYS = {"static_color"}
 
 
+def _read_cfg_file():
+    """Прочитать конфиг: сначала основной файл, при неудаче — копию .bak.
+
+    Основной файл однажды оказался забит нулями, и приложение из-за
+    этого не стартовало. Теперь битый файл не смертелен: берёмся за
+    резервную копию, а если и она недоступна — стартуем с настройками по
+    умолчанию, вместо того чтобы падать."""
+    for path in (CONFIG_PATH, CONFIG_PATH + ".bak"):
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("не словарь")
+            return data, path
+        except Exception as e:
+            print(f"[config] {os.path.basename(path)} не читается: {e}")
+    return {}, None
+
+
 def load():
     cfg = dict(DEFAULTS)
+    data = {}          # на случай, если файла нет или он битый
     try:
-        if os.path.isfile(CONFIG_PATH):
-            with open(CONFIG_PATH, encoding="utf-8") as f:
-                data = json.load(f)
+        data, _src = _read_cfg_file()
+        if data:
             for k, v in data.items():
                 if k in DEFAULTS:
                     cfg[k] = v
@@ -266,10 +287,31 @@ def load():
 
 
 def save(cfg):
+    """Записать конфиг.
+
+    Запись идёт через временный файл и os.replace — она атомарна. Но
+    20.10.2026 основной файл оказался забит нулями: приложение убили
+    в момент автосохранения, и подпорки не осталось — настройки пришлось
+    брать из git. Поэтому рядом лежит .bak — копия прошлого удачного
+    файла. Её не трогает текущее сохранение, и если основной файл вдруг
+    окажется битым, настройки поднимутся оттуда.
+    """
     try:
+        # копия прошлого хорошего состояния — до подмены основного файла
+        try:
+            if os.path.isfile(CONFIG_PATH) and os.path.getsize(CONFIG_PATH) > 0:
+                with open(CONFIG_PATH, "rb") as src:
+                    head = src.read(64)
+                if head[:1] not in (b"\x00",):      # не пустой и не нули
+                    with open(CONFIG_PATH + ".bak", "wb") as dst:
+                        dst.write(open(CONFIG_PATH, "rb").read())
+        except Exception:
+            pass
         tmp = CONFIG_PATH + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2, ensure_ascii=False)
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, CONFIG_PATH)
         return True
     except Exception as e:
