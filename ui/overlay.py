@@ -415,6 +415,8 @@ class Overlay(QWidget):
         self._fps_n = 0
         self._fps_at = time.monotonic()
         self._fps_real = 0.0
+        self._tick_gap = 0.0          # худший провал между тиками, с
+        self._tick_gaps = 0           # сколько раз провал был больше 0.4 с
         self._panel_blocked = False
         self._panel_cover = 0.0
         self._wave = np.zeros(1024, dtype=np.float32)
@@ -1063,7 +1065,17 @@ class Overlay(QWidget):
         # что оверлей перестал обновляться — из-за зависшего звука, зависшего
         # таймера или потерянного окна. Без неё «зависший» оверлей неотличим
         # от работающего, пока смотришь на картинку.
-        self._last_tick = time.monotonic()
+        now = time.monotonic()
+        # Провал между тиками. Если главный поток застрял (долгий проход
+        # сборщика мусора, зависший Qt), между тиками будет дыра в сотни
+        # миллисекунд и больше. Само по себе это ещё ничего не значит, но
+        # с цифрой на руках сразу видно: приложение подвисает или нет.
+        gap = now - self._last_tick
+        if gap > getattr(self, "_tick_gap", 0.0):
+            self._tick_gap = gap
+            if gap > 0.4:
+                self._tick_gaps = getattr(self, "_tick_gaps", 0) + 1
+        self._last_tick = now
         self._fps_n += 1
         now = self._last_tick
         if now - self._fps_at >= 1.0:

@@ -12,6 +12,7 @@
 """
 import faulthandler
 import json
+import gc
 import logging
 import os
 import queue
@@ -305,6 +306,13 @@ class Hub:
         with self._lock:
             if q in self._clients:
                 self._clients.remove(q)
+
+    def has_clients(self):
+        """Есть ли хоть один подписчик. Проверяется без снимка и без
+        сериализации — иначе пустая рассылка стоила бы работы главному
+        потоку каждые 60 мс."""
+        with self._lock:
+            return bool(self._clients)
 
     def publish(self, obj):
         try:
@@ -687,6 +695,10 @@ class Core:
             "overlay_fps_actual": round(float(getattr(self.overlay, "_fps_real", 0.0)), 1),
             "grab_busy": bool(getattr(self.overlay, "_grab_busy", False)),
             "grab_core": getattr(self.overlay, "_grab_core", None),
+            # Провал между тиками главного потока. Большой разрыв = приложение
+            # подвисало (долгий проход сборщика мусора, зависший Qt).
+            "tick_gap": round(float(getattr(self.overlay, "_tick_gap", 0.0)), 3),
+            "tick_gaps": int(getattr(self.overlay, "_tick_gaps", 0)),
             "saved_at": self.saved_flash,
             "devices_total": len(self.devices),
             # для фоновой анимации: бас + компактный спектр (считаем один раз)
@@ -1262,7 +1274,11 @@ def _pump(core, app):
 
     def tick():
         try:
-            core.hub.publish(core.snapshot())
+            # Снимок и его сериализация — работа на главном потоке, а
+            # подписчиков часто нет (панель закрыта). Проверяем список
+            # подписчиков ДО снимка: пусто — делать нечего.
+            if core.hub.has_clients():
+                core.hub.publish(core.snapshot())
         except Exception:
             pass
 
@@ -1530,6 +1546,28 @@ def main():
         log.info("трея: значок AuraFusion добавлен")
 
     app.aboutToQuit.connect(_bye)
+    # Сборщик мусора. Приложение живёт часами и рисует кадры, создавая мусор
+    # каждый кадр. Циклический сборщик по умолчанию со временем обходит всё
+    # больший кучу, и такой проход занимает СЕКУНДЫ. Проход — это нативный
+    # код, он держит GIL, и всё приложение на это время замирает: поток
+    # http-сервера не может проснуться, и панель перестаёт отвечать.
+    #
+    # Признаки были все характерные: сразу после запуска сервер отвечает за
+    # 0-14 мс, через два часа — 2.4-3 с; py-spy показывал главный поток в
+    # app.exec(), а треть замеров стека не читалась вовсе (сборщик в это
+    # время в C-коде, питоновского кадра нет).
+    #
+    # Что делаем: после старта замораживаем всё, что уже живёт, — сборщику
+    # больше не нужно это пересматривать; и делаем сборы реже. Пороги по
+    # умолчанию (700, 10, 10) для процесса, который непрерывно создаёт
+    # объекты, слишком шумные.
+    try:
+        gc.collect()
+        gc.freeze()
+        gc.set_threshold(50000, 50, 50)
+        log.info("gc: постоянные объекты заморожены, сборы пореже")
+    except Exception as e:
+        log.warning("gc: не настроил (%s)", e)
     try:
         rc = app.exec()
     finally:
