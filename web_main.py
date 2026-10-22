@@ -1437,6 +1437,56 @@ def _run_server(httpd):
             time.sleep(2.0)
 
 
+def _claim_port(host, port):
+    """Занять порт, не оставляя залипшего двойника.
+
+    Так и было: при перезапуске старый процесс мог не умереть и продолжать
+    слушать 8765. Новый экземпляр в это время поднимал сервер впустую — а на
+    Windows второй сокет спокойно садится на тот же порт, так что запросы
+    уходили то одному, то другому. Выглядело это как «зависло»: панель то
+    отвечает, то нет, а перезапуск не помогает.
+
+    Если на порту кто-то живой и отвечает — это второй работающий экземпляр,
+    второй не нужен, выходим. Если молчит — он залип, снимаем по PID.
+    """
+    import urllib.request
+    url = f"http://{host}:{port}/api/state"
+    try:
+        urllib.request.urlopen(url, timeout=1.5).read(64)
+        log.warning("порт %d уже занят работающим AuraFusion — второй не поднимаю", port)
+        return False
+    except Exception:
+        pass  # не отвечает или отвечает не нашим кодом — разберёмся ниже
+
+    # кто держит порт (Windows). PowerShell дорогой, но запускается один раз
+    try:
+        import subprocess
+        out = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-NetTCPConnection -LocalPort %d -State Listen "
+             "-ErrorAction SilentlyContinue | Select-Object -First 1 "
+             "OwningProcess).OwningProcess" % port],
+            capture_output=True, text=True, timeout=12)
+        pid = int((out.stdout or "").strip() or 0)
+    except Exception as e:
+        log.warning("PID держателя порта %d не достать: %s", port, e)
+        return True  # пусть сервер пробует: хуже, чем сейчас, не будет
+    if pid <= 0:
+        return True
+    me = os.getpid()
+    if pid == me:
+        return True
+    log.warning("порт %d держит залипший процесс %d — снимаю", port, pid)
+    try:
+        import subprocess
+        subprocess.run(["taskkill", "/PID", str(pid), "/F"],
+                       capture_output=True, timeout=10)
+    except Exception as e:
+        log.error("процесс %d не снять: %s", pid, e)
+    time.sleep(1.2)
+    return True
+
+
 def main():
     args = sys.argv[1:]
     port = 8765
@@ -1493,6 +1543,9 @@ def main():
     except Exception as e:
         log.warning("иконку вкладки отдать не выйдет: %s", e)
 
+    if not _claim_port(host, port):
+        log.info("выход: порт %d занят работающим экземпляром", port)
+        return
     httpd = ThreadingHTTPServer((host, port), Handler)
     httpd.daemon_threads = True
     # Поток сервера с переподъёмом после падения. Раньше был голый
