@@ -120,6 +120,11 @@ DEFAULTS = {
     # --- подсветка ПК ---
     "rgb_enabled": True,
     "rgb_mode": "mix",          # mix (цвет экран + пульс музыка) | screen | music
+    # свой ИСТОЧНИК цвета по типу устройства. Пусто ("") — как в rgb_mode.
+    # Так можно держать видеокарту на цвете экрана, а блютус-ленту — на
+    # музыке или на одной постоянной, и наоборот.
+    "color_source_gpu": "",     # "" | screen | music | static
+    "color_source_ble": "",     # "" | screen | music | static
     "static_color": "#C50DF1",
     "color_all": True,
     "devices": {
@@ -191,7 +196,7 @@ FLOAT_KEYS = {
 # Строковые ключи, которые по ошибке тоже попали в INT_KEYS: int(float())
 # на «#C50DF1» падает, обработчик проглатывал исключение и молча возвращал
 # значение по умолчанию — выбранный цвет просто не сохранялся.
-STR_KEYS = {"static_color"}
+STR_KEYS = {"static_color", "color_source_gpu", "color_source_ble"}
 
 
 def _read_cfg_file():

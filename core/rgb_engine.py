@@ -289,6 +289,10 @@ class RGBEngine(threading.Thread):
 
     def _current_base(self, t, cfg):
         mode = cfg.get("rgb_mode", "mix")
+        # свой источник цвета по типу устройства — пусто значит "как в общих"
+        own = cfg.get("color_source_ble" if is_ble_target(t) else "color_source_gpu", "")
+        if own in ("screen", "music", "static"):
+            mode = own
         if mode in ("mix", "screen"):
             with self.sc.lock:
                 shown = self.sc.shown.copy()
