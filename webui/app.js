@@ -22,6 +22,10 @@ const api = {
   async audio() { return (await fetch('/api/audio')).json(); },
   async monitors() { return (await fetch('/api/monitors')).json(); },
   async scenes() { return (await fetch('/api/scenes')).json(); },
+  async logs(level, source, n) {
+    const q = new URLSearchParams({ level, source, n });
+    return (await fetch('/api/logs?' + q)).json();
+  },
   async set(patch) {
     await fetch('/api/set', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -221,13 +225,14 @@ function mkSelect(c) {
       it.append(el('span', null, text));
       it.addEventListener('click', () => {
         api_el.value = value;
-        CFG[c.key] = value;
+        if (!c.local) CFG[c.key] = value;
         closeDD();
         // Значение уходит на сервер ВСЕГДА, а обработчик — это уведомление
         // после сохранения, а не его замена. Раньше ветка с onchange
         // пропускала put(), и выбор стиля менялся только в памяти браузера:
         // сервер о нём не узнавал, оверлей рисовал прежнюю фигуру.
-        put({ [c.key]: c.isInt ? parseInt(value, 10) : value });
+        // local — выбор живёт только в самой панели (фильтры журнала)
+        if (!c.local) put({ [c.key]: c.isInt ? parseInt(value, 10) : value });
         if (c.onchange) c.onchange(value, api_el);
       });
       list.append(it);
@@ -244,7 +249,7 @@ function mkSelect(c) {
   menu.addEventListener('click', e => e.stopPropagation());
 
   c.setOptions(c.options || []);
-  api_el.value = CFG[c.key] ?? '';
+  api_el.value = c.local ? (c.value ?? '') : (CFG[c.key] ?? '');
   if (c.mini) {
     // обновление списка (мониторы / loopback). Класс btn icon — из общей
     // системы кнопок: раньше стоял ghost mini, таких стилей в CSS уже нет,
@@ -1135,10 +1140,109 @@ function cur(key) {
   return (ov && Object.prototype.hasOwnProperty.call(ov, key)) ? ov[key] : CFG[key];
 }
 
+/* ================= страница «Логи» ================= */
+// Последние ошибки и предупреждения прямо в панели — без открытия
+// aurafusion.log. Подряд идущие одинаковые записи сервер схлопывает со
+// счётчиком, поэтому одна повторяющаяся ошибка не занимает весь экран.
+const LOGUI = { timer: null, last: null };
+
+function buildLogPage() {
+  const page = el('div', 'page');
+  page.dataset.page = 'log';
+  const sec = el('section', 'sec');
+  const head = el('div', 'sechead');
+  head.append(el('span', 'bar'), el('h3', null, 'Журнал работы'),
+    el('span', 'desc', 'Что пошло не так: ошибки и предупреждения приложения'));
+  sec.append(head);
+
+  const bar = el('div', 'logbar');
+  // Родные выпадающие списки панели (mkSelect), а не голый <select>:
+  // системный список не подхватывает тему и выглядел чужим.
+  const mkSel = (opts, val) => {
+    const c = { local: true, options: opts.map(([v, t]) => [t, v]), value: val, onchange: () => LOGUI.load && LOGUI.load() };
+    c.node = mkSelect(c);
+    return c;
+  };
+  const selLevel = mkSel([['problems', 'Предупреждения и ошибки'], ['errors', 'Только ошибки'], ['all', 'Всё подряд']], 'problems');
+  const selSrc = mkSel([['app', 'Приложение'], ['crash', 'Падения (crash)'], ['openrgb', 'Вывод OpenRGB']], 'app');
+  const selN = mkSel([['100', '100 записей'], ['200', '200 записей'], ['500', '500 записей']], '200');
+  const bRef = el('button', 'btn', 'Обновить');
+  const bCopy = el('button', 'btn', 'Копировать');
+  const auto = el('label', 'logauto');
+  const cb = el('input'); cb.type = 'checkbox'; cb.checked = true;
+  auto.append(cb, document.createTextNode(' автообновление'));
+  bar.append(selLevel.node, selSrc.node, selN.node, bRef, bCopy, auto);
+  sec.append(bar);
+
+  const info = el('div', 'loginfo', '');
+  const list = el('div', 'loglist');
+  sec.append(info, list);
+  page.append(sec);
+
+  async function load() {
+    try {
+      const r = await api.logs(selLevel.el.value, selSrc.el.value, selN.el.value);
+      LOGUI.last = r;
+      list.innerHTML = '';
+      const ents = r.entries || [];
+      const kb = Math.round((r.size || 0) / 1024);
+      info.textContent = `${r.path || ''} • ${kb} КБ • показано ${ents.length}` +
+        (r.total && r.total > ents.length ? ` из ${r.total}` : '');
+      if (!ents.length) {
+        list.append(el('div', 'logempty', selLevel.el.value === 'all' && selSrc.el.value === 'app'
+          ? 'Журнал пуст.' : 'Ошибок нет ✓'));
+        return;
+      }
+      for (const e of ents) {
+        const row = el('div', 'logrow lv-' + String(e.level || 'INFO').toLowerCase());
+        row.append(el('span', 'lt', e.t ? e.t.slice(5) : ''));
+        row.append(el('span', 'll', e.level === 'WARNING' ? 'WARN' : (e.level || '')));
+        row.append(el('span', 'lc', e.count > 1 ? '×' + e.count : ''));
+        const lines = String(e.msg || '').split('\n');
+        const msg = el('div', 'lm');
+        msg.append(el('div', 'lm1', lines[0]));
+        if (lines.length > 1) {
+          const more = el('pre', 'lmore', lines.slice(1).join('\n'));
+          more.hidden = true;
+          const tg = el('button', 'lmtg', `подробности (${lines.length - 1} стр.)`);
+          tg.addEventListener('click', () => {
+            more.hidden = !more.hidden;
+            tg.textContent = more.hidden ? `подробности (${lines.length - 1} стр.)` : 'свернуть';
+          });
+          msg.append(tg, more);
+        }
+        row.append(msg);
+        list.append(row);
+      }
+    } catch (err) {
+      info.textContent = 'не удалось прочитать журнал: ' + err;
+    }
+  }
+  LOGUI.load = load;
+  bRef.addEventListener('click', load);
+  bCopy.addEventListener('click', async () => {
+    const ents = (LOGUI.last && LOGUI.last.entries) || [];
+    const txt = ents.map(e => `${e.t} ${e.level}${e.count > 1 ? ' x' + e.count : ''} ${e.msg}`).join('\n');
+    try { await navigator.clipboard.writeText(txt); toast('скопировано'); }
+    catch (_) { toast('не удалось скопировать'); }
+  });
+  LOGUI.autoOn = () => cb.checked;
+  return page;
+}
+
+function logsStart() {
+  if (!LOGUI.load) return;
+  LOGUI.load();
+  clearInterval(LOGUI.timer);
+  LOGUI.timer = setInterval(() => { if (LOGUI.autoOn && LOGUI.autoOn()) LOGUI.load(); }, 3000);
+}
+function logsStop() { clearInterval(LOGUI.timer); LOGUI.timer = null; }
+
 function buildAll() {
   const host = $('#pages');
   host.innerHTML = '';
   Object.keys(PAGES).forEach(k => host.append(buildPage(k)));
+  host.append(buildLogPage());
   Object.keys(PAGES).forEach(fillValues);
 }
 
@@ -1172,6 +1276,7 @@ function renderDevices() {
       const w = el('div', 'dev' + (d.enabled ? ' on' : ''));
       w.append(el('span', 'led'), el('span', 'nm', d.name));
       if (d.ble) w.append(el('span', 'tag', 'BLE'));
+      if (d.skydimo) w.append(el('span', 'tag', 'SKY'));
       box.append(w);
     }
   });
@@ -1212,6 +1317,7 @@ function goto(key) {
     p.classList.toggle('on', p.dataset.page === key));
   if (key === 'amb' || key === 'sys') refreshMonitors();
   if (key === 'snd') refreshAudio();
+  if (key === 'log') logsStart(); else logsStop();
   $('#pages').scrollTop = 0;
 }
 
@@ -1316,8 +1422,8 @@ function startStream() {
   // горячие клавиши: 1..5 — страницы, пробел — RGB
   document.addEventListener('keydown', e => {
     if (/^(INPUT|SELECT|TEXTAREA)$/.test(e.target.tagName)) return;
-    const keys = ['viz', 'amb', 'rgb', 'snd', 'sys'];
-    if (e.key >= '1' && e.key <= '5') goto(keys[+e.key - 1]);
+    const keys = ['viz', 'amb', 'rgb', 'snd', 'sys', 'log'];
+    if (e.key >= '1' && e.key <= '6') goto(keys[+e.key - 1]);
     if (e.code === 'Space') { e.preventDefault(); api.act('toggle_rgb'); }
   });
 

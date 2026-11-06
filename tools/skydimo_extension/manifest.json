@@ -1,0 +1,11 @@
+{
+  "id": "aurafusion",
+  "version": "1.0.0",
+  "name": "AuraFusion Bridge",
+  "publisher": "AuraFusion",
+  "type": "extension",
+  "language": "lua",
+  "entry": "init.lua",
+  "permissions": ["network:tcp"],
+  "description": "Paints leds from AuraFusion via ext.set_leds."
+}

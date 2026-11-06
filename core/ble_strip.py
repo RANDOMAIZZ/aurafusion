@@ -1,9 +1,8 @@
 """BLE RGB-лента как устройство подсветки AuraFusion.
 
 Контроллеры семейства ELK-BLEDOM / ELK-BLEDDM / LED LIGHT STRIP / XSL-
-(приложение wl.smartled "宝莲灯", LotusLantern). Транспорт — GATT, а не
+(приложение wl.smartled "宝莲灯", LotusLantern) и Skydimo. Транспорт — GATT, а не
 OpenRGB, поэтому лента живёт в общем конвейере RGBEngine через BleTarget:
-тот же цвет с экрана, тот же пульс яркости от музыки, те же настройки.
 
 Кадр ровно 9 байт: 7E LEN CMD P1 P2 P3 P4 P5 EF
 Сервис FFF0, запись в FFF3 (с подтверждением), notify FFF4.
@@ -16,7 +15,7 @@ SERVICE = "0000fff0-0000-1000-8000-00805f9b34fb"
 WRITE_CH = "0000fff3-0000-1000-8000-00805f9b34fb"
 NOTIFY_CH = "0000fff4-0000-1000-8000-00805f9b34fb"
 
-NAME_PREFIXES = ("ELK-", "ELK~", "LED LIGHT STRIP", "XSL-")
+NAME_PREFIXES = ("ELK-", "ELK~", "LED LIGHT STRIP", "XSL-", "Skydimo")
 
 
 def frame(len_marker, cmd, p1=0xFF, p2=0xFF, p3=0xFF, p4=0xFF, p5=0xFF):

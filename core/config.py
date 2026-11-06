@@ -130,6 +130,11 @@ DEFAULTS = {
     "devices": {
         "B760 GAMING X DDR4 GEN5": {"zone_name": "ARGB_V2_2", "leds": 60, "enabled": True, "color_hex": "#C50DF1"},
     },
+    # Как красить ленту Skydimo: "mirror" — цвет по краям экрана считает сама
+    # программа Skydimo (ScreenMirror), AuraFusion качает только яркость от
+    # музыки; "solid" — AuraFusion красит все светодиоды одним цветом.
+    "skydimo_mode": "mirror",
+    "skydimo_com": "COM4",   # COM-порт ленты Skydimo в запросе set-led
     "rgb_fps": 30,
     "bass_boost": 1.6,
     "attack_s": 0.05, "release_s": 0.4, "avg_s": 2.0,
@@ -146,6 +151,7 @@ DEFAULTS = {
     "web_theme": "neon",          # тема web-интерфейса, 20 шт. (список — THEMES в webui/app.js)
     "autostart": False, "autosave": True,
     "openrgb_host": "127.0.0.1", "openrgb_port": 6742,
+    "openrgb_path": "",   # полный путь к OpenRGB.exe, если он лежит не в обычном месте
 }
 
 
@@ -196,7 +202,38 @@ FLOAT_KEYS = {
 # Строковые ключи, которые по ошибке тоже попали в INT_KEYS: int(float())
 # на «#C50DF1» падает, обработчик проглатывал исключение и молча возвращал
 # значение по умолчанию — выбранный цвет просто не сохранялся.
-STR_KEYS = {"static_color", "color_source_gpu", "color_source_ble"}
+STR_KEYS = {"skydimo_mode", "skydimo_com", "static_color", "color_source_gpu", "color_source_ble"}
+
+
+def coerce_patch(patch):
+    """Привести значения патча к типам, которых ждёт код.
+
+    Без этого `{"rgb_fps": "abc"}` из /api/set доходил до int() в цикле
+    движка подсветки и убивал его поток. Приводим так же, как при загрузке;
+    значения, которые привести нельзя, отбрасываем."""
+    out = {}
+    for k, v in patch.items():
+        try:
+            if k in INT_KEYS and not isinstance(v, bool):
+                v = int(float(v))
+            elif k in FLOAT_KEYS and not isinstance(v, bool):
+                lo, hi = FLOAT_KEYS[k]
+                v = float(min(hi, max(lo, float(v))))
+            elif k in STR_KEYS:
+                if not isinstance(v, str) or not v:
+                    continue
+            else:
+                d = DEFAULTS.get(k)
+                # числа по умолчанию -> число; строка вместо числа ломает арифметику
+                if (isinstance(d, (int, float)) and not isinstance(d, bool)
+                        and not isinstance(v, bool)):
+                    v = float(v)
+                    if isinstance(d, int) and v == int(v):
+                        v = int(v)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        out[k] = v
+    return out
 
 
 def _read_cfg_file():

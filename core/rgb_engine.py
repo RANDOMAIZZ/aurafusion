@@ -79,15 +79,62 @@ def apply_dark_threshold(rgb, cfg):
     return (int(rgb[0] * f), int(rgb[1] * f), int(rgb[2] * f))
 
 
+def _clamp(v, lo, hi):
+    if lo is None or hi is None:
+        return v
+    a, b = min(lo, hi), max(lo, hi)
+    return max(a, min(b, v))
+
+
+def fix_mode(m):
+    """Привести параметры режима к допустимым границам перед отправкой.
+
+    У видеокарты GALAX после загрузки режим Direct приходит с мусором:
+    speed = 130 при допустимом диапазоне 0..0 и brightness = 129 при 1..3.
+    Библиотека проверяет значения перед отправкой и бросает ValueError, а
+    «пинок» режима глотал это исключение и считал, что всё сделано, — на деле
+    Direct не выставлялся, и карта оставалась тусклой/в чужом состоянии.
+    Скорость зажимаем в границы, яркость ставим максимальной: цвет и так
+    домножается движком, а аппаратная яркость должна быть полной."""
+    try:
+        if getattr(m, "speed", None) is not None:
+            m.speed = _clamp(m.speed, getattr(m, "speed_min", None), getattr(m, "speed_max", None))
+        if getattr(m, "brightness", None) is not None and getattr(m, "brightness_max", None) is not None:
+            m.brightness = m.brightness_max
+    except Exception:
+        pass
+    return m
+
+
+def set_mode_safe(d, name):
+    """Выставить режим по имени с исправленными параметрами."""
+    m = next((x for x in d.modes if x.name == name), None)
+    if m is None:
+        raise RuntimeError("режим не найден: %s" % name)
+    fix_mode(m)
+    d.set_mode(m)
+
+
 def force_direct(d):
     try:
         cur = getattr(d, "active_mode", None)
-        if cur is not None and str(getattr(cur, "name", "")).lower() == "direct":
+        name = None
+        if cur is not None:
+            try:
+                name = d.modes[cur].name
+            except Exception:
+                name = str(getattr(cur, "name", ""))
+        if str(name).lower() == "direct":
+            # уже Direct — но параметры могли прийти испорченными, поправим
+            try:
+                set_mode_safe(d, "Direct")
+            except Exception:
+                pass
             return
     except Exception:
         pass
     try:
-        d.set_mode("Direct")
+        set_mode_safe(d, "Direct")
         return
     except Exception:
         pass
@@ -95,10 +142,10 @@ def force_direct(d):
         other = next((md.name for md in d.modes if md.name != "Direct"), None)
         if other:
             try:
-                d.set_mode(other)
+                set_mode_safe(d, other)
             except Exception:
                 pass
-            d.set_mode("Direct")
+            set_mode_safe(d, "Direct")
     except Exception:
         try:
             d.set_custom_mode()
@@ -180,12 +227,12 @@ def kick_device_mode(host, port, device_name):
         other = next((md.name for md in d.modes if md.name != "Direct"), None)
         if other:
             try:
-                d.set_mode(other)
+                set_mode_safe(d, other)
             except Exception:
                 pass
             time.sleep(0.2)
         try:
-            d.set_mode("Direct")
+            set_mode_safe(d, "Direct")
         except Exception:
             force_direct(d)
     finally:
@@ -193,6 +240,67 @@ def kick_device_mode(host, port, device_name):
             c.disconnect()
         except Exception:
             pass
+
+
+def kick_devices(host, port, names):
+    """Дёрнуть режим сразу у нескольких устройств через ОДНО подключение.
+
+    То же, что kick_device_mode, но без отдельного клиента на каждое
+    устройство: каждый `OpenRGBClient` заново перечисляет всё железо, и после
+    перезагрузки, когда драйверы ещё просыпаются, это самое слабое место.
+    Возвращает список имён, у которых режим удалось выставить."""
+    import openrgb
+    ok = []
+    c = openrgb.OpenRGBClient(address=host, port=port)
+    try:
+        by_name = {d.name: d for d in c.devices}
+        for name in names:
+            d = by_name.get(name)
+            if d is None:
+                continue
+            try:
+                other = next((md.name for md in d.modes if md.name != "Direct"), None)
+                if other:
+                    try:
+                        set_mode_safe(d, other)
+                    except Exception:
+                        pass
+                    time.sleep(0.2)
+                try:
+                    set_mode_safe(d, "Direct")
+                except Exception:
+                    force_direct(d)
+                ok.append(name)
+            except Exception:
+                continue
+    finally:
+        try:
+            c.disconnect()
+        except Exception:
+            pass
+    return ok
+
+
+def system_uptime_s():
+    """Сколько секунд работает Windows. После перезагрузки подсветке нужны
+    повторные «пинки» режима, при ручном перезапуске программы — нет."""
+    try:
+        import ctypes
+        f = ctypes.windll.kernel32.GetTickCount64
+        f.restype = ctypes.c_ulonglong
+        return float(f()) / 1000.0
+    except Exception:
+        return 1e9
+
+
+# Когда после старта движка дёргать режим. Сразу после перезагрузки железо
+# просыпается неровно: видеокарта и ARGB-колодка материнки принимают Direct
+# через десятки секунд, а один «пинок» в самом начале попадал в момент, когда
+# они ещё не готовы — режим «залипал» и приходилось переключать руками.
+# Поэтому на загрузке ПК бьём несколько раз с нарастающим интервалом.
+KICK_PLAN_BOOT = (0.0, 8.0, 25.0, 60.0, 120.0)
+KICK_PLAN_WARM = (0.0,)
+BOOT_WINDOW_S = 15 * 60
 
 
 def resolve_zone(cfg_target, conn):
@@ -223,6 +331,11 @@ def resolve_zone(cfg_target, conn):
 def is_ble_target(t):
     """BLE-лента вместо OpenRGB-устройства (transport='ble' в конфиге)."""
     return str(t.get("transport", "")).lower() == "ble"
+
+
+def is_skydimo_target(t):
+    """Skydimo SK0L27 через WebSocket oficial'noy programma (transport='skydimo')."""
+    return str(t.get("transport", "")).lower() == "skydimo"
 
 
 class OrgbSink:
@@ -263,7 +376,7 @@ class BleSink:
 
 class RGBEngine(threading.Thread):
     def __init__(self, cfg_getter, audio, screencolor, state, targets_fn,
-                 initial_delay=0.0, log=None):
+                 initial_delay=0.0, log=None, skydimo=None, ext=None):
         super().__init__(daemon=True)
         self._cfg = cfg_getter
         self.audio = audio
@@ -274,8 +387,35 @@ class RGBEngine(threading.Thread):
         self.log = log or (lambda *a: None)
         self.stop_flag = threading.Event()
         self.conn = None
+        self.skydimo = skydimo
+        self.ext = ext
         self._targets = None
         self._sig = None
+        self._kick_plan = None      # абсолютные моменты (monotonic) ближайших «пинков»
+        self._kick_busy = False
+        self._resend = False        # после «пинка» заново отправить цвет
+        self._retry_at = 0.0        # когда повторить подбор недоступных устройств
+
+    def _kick_async(self, host, port, names):
+        """«Пинок» режима в отдельном потоке: он занимает секунды и не должен
+        тормозить кадры подсветки."""
+        if self._kick_busy or not names:
+            return
+        self._kick_busy = True
+
+        def work():
+            try:
+                done = kick_devices(host, port, names)
+                if done:
+                    self.log("rgb: режим Direct выставлен: %s",
+                             ", ".join(n[:22] for n in done))
+                    self.state["status"] = "Direct подтверждён: %d устр." % len(done)
+            except Exception as e:
+                self.log("rgb: пинок режима не удался: %s", e)
+            finally:
+                self._resend = True
+                self._kick_busy = False
+        threading.Thread(target=work, daemon=True, name="rgb-kick").start()
 
     def _make_ble_sink(self, t, cfg):
         try:
@@ -314,7 +454,6 @@ class RGBEngine(threading.Thread):
 
     def run(self):
         state = self.state
-        self._kicked = False  # авто-кик GPU делается один раз за запуск движка
         if self._initial_delay > 0:
             state["status"] = f"пауза {int(self._initial_delay)}с (ПК загружается)..."
             if self.stop_flag.wait(self._initial_delay):
@@ -337,7 +476,10 @@ class RGBEngine(threading.Thread):
                 host, port = cfg.get("openrgb_host", "127.0.0.1"), int(cfg.get("openrgb_port", 6742))
                 dt = 1.0 / max(1, int(cfg.get("rgb_fps", 30)))
                 live = list(self._targets_fn())
-                need_orgb = any(not is_ble_target(t) for t in live)
+                # ни BLE, ни Skydimo не ходят через OpenRGB — ждать его
+                # из-за них нельзя, иначе лента без OpenRGB не заработает
+                need_orgb = any(not is_ble_target(t) and not is_skydimo_target(t)
+                                for t in live)
                 # OpenRGB нужен только если есть хоть одно его устройство:
                 # BLE-лента обязана работать и когда сервер OpenRGB не поднят
                 if need_orgb and self.conn is None:
@@ -358,12 +500,24 @@ class RGBEngine(threading.Thread):
                     names = ", ".join(t["device_name"][:18] for t in live) or "нет устройств"
                     if not state.get("error"):
                         state["status"] = f"RGB работает | {names}"
+                # Часть устройств могла быть недоступна при подборе (видеокарта
+                # ещё не появилась в OpenRGB после загрузки). Раньше подбор
+                # больше не повторялся, и такое устройство оставалось
+                # «потерянным» до перезапуска программы.
+                if (self._retry_at and self._targets is not None
+                        and time.monotonic() >= self._retry_at):
+                    self._retry_at = 0.0
+                    self._targets = None
                 if self._targets is None:
                     resolved, bad = [], []
                     for t in live:
                         try:
                             if is_ble_target(t):
                                 resolved.append((t, self._make_ble_sink(t, cfg)))
+                            elif is_skydimo_target(t):
+                                # Skydimo SK0L27 — через WebSocket, не OpenRGB.
+                                # Sink не нужен: цвет уходит через self.skydimo.
+                                resolved.append((t, None))
                             else:
                                 tt = dict(t)
                                 tt["_host"], tt["_port"] = host, port
@@ -380,19 +534,36 @@ class RGBEngine(threading.Thread):
                         self.log("rgb: часть устройств недоступна: %s", "; ".join(bad))
                         state["status"] = f"RGB работает | {names}"
                         state["error"] = "; ".join(bad)[:200]
+                        self._retry_at = time.monotonic() + 8.0
+                    else:
+                        self._retry_at = 0.0
+                        state["error"] = None
+                    # новое устройство в списке — сразу «пинок» режима
+                    if self._kick_plan is not None:
+                        self._kick_plan.append(time.monotonic() + 2.0)
+                        self._kick_plan.sort()
                     self._targets = resolved
                 ts = self._targets
-                # авто-кик GPU: дёрнуть режим туда-обратно один раз,
-                # иначе GALAX-подобные висят в 'Direct', но цвет не берут
-                if ts and not self._kicked and cfg.get("mode_kick", True):
-                    self._kicked = True
-                    for t, _ in ts:
-                        if is_gpu_like(t["device_name"]):
-                            try:
-                                kick_device_mode(host, port, t["device_name"])
-                                state["status"] = f"режим GPU дёрнут: {t['device_name'][:24]}"
-                            except Exception as e:
-                                state["status"] = f"кик GPU не удался: {e}"
+                # «Пинок» режима: дёрнуть режим туда-обратно, чтобы устройство
+                # реально встало в Direct. Нужен ВСЕМ устройствам OpenRGB
+                # (видеокарта, колодка материнки с водянкой), а не только
+                # «похожим на видеокарту», и после перезагрузки не один раз,
+                # а несколько — по плану, пока железо не проснётся.
+                if ts and cfg.get("mode_kick", True):
+                    now_k = time.monotonic()
+                    if self._kick_plan is None:
+                        plan = (KICK_PLAN_BOOT if system_uptime_s() < BOOT_WINDOW_S
+                                else KICK_PLAN_WARM)
+                        self._kick_plan = [now_k + 1.0 + dt0 for dt0 in plan]
+                    if self._kick_plan and now_k >= self._kick_plan[0]:
+                        self._kick_plan.pop(0)
+                        names_k = [t["device_name"] for t, sk in ts
+                                   if sk is not None and not is_ble_target(t)
+                                   and not is_skydimo_target(t)]
+                        self._kick_async(host, port, names_k)
+                if self._resend:
+                    self._resend = False
+                    last_sig = None
                 # аудио-уровень из общего движка
                 try:
                     _, _, level, bass, has_sig = self.audio.snapshot()
@@ -431,9 +602,38 @@ class RGBEngine(threading.Thread):
                 paint_color = cols[0] if cols else (197, 13, 241)
                 if changed or heartbeat_due:
                     try:
+                        skydimo_cols = []
+                        mirror = str(cfg.get("skydimo_mode", "mirror")) == "mirror"
                         for i, (t, sink) in enumerate(ts):
                             final = apply_led_floor(scale_color(cols[i], prev), cfg)
-                            sink.paint(final)
+                            if sink is not None:
+                                sink.paint(final)
+                            elif is_skydimo_target(t) and mirror:
+                                # цвет по экрану считает сама Skydimo (адресно,
+                                # по краям), мы отдаём только яркость: пульс от
+                                # музыки с полом, чтобы лента не гасла совсем
+                                if self.ext is not None:
+                                    try:
+                                        self.ext.push_brightness(max(0.03, prev))
+                                    except Exception as ee:
+                                        self.log("rgb: skydimo-ext fail: %s", ee)
+                            elif is_skydimo_target(t):
+                                # Skydimo SK0L27 — цвет уходит через WebSocket.
+                                # leds светодиодов, всем одинаковый цвет.
+                                n = int(t.get("leds", 96))
+                                skydimo_cols.extend([final] * n)
+                        if skydimo_cols:
+                            # painting via Lua extension (tcp 8766 -> skydimo-core)
+                            if self.ext is not None:
+                                try:
+                                    self.ext.push(skydimo_cols)
+                                except Exception as ee:
+                                    self.log("rgb: skydimo-ext fail: %s", ee)
+                            if self.skydimo:
+                                try:
+                                    self.skydimo.set_colors(skydimo_cols)
+                                except Exception as es:
+                                    self.log("rgb: сбой Skydimo: %s", es)
                         last_sig = (prev, tuple(cols))
                         last_send_t = now_m
                     except Exception as e:
@@ -492,6 +692,8 @@ class RGBEngine(threading.Thread):
             except Exception:
                 pass
             for _t, sink in (self._targets or []):
+                if sink is None:
+                    continue  # Skydimo: закрывает общий SkydimoClient
                 try:
                     sink.close()
                 except Exception:

@@ -1,1 +1,0 @@
-{"required":true,"package":"dev.mw.passthrough.mixin","compatibilityLevel":"JAVA_21","client":["ClientTickMixin"],"injectors":{"defaultRequire":1},"refmap":"client-mw-passthrough-refmap.json"}

@@ -524,3 +524,28 @@ select:hover{border-color:var(--muted);}
   *{animation:none !important;transition:none !important;}
   .bg-blobs ellipse{transform:none;}
 }
+
+/* ---------- страница «Логи» ---------- */
+.logbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:4px 0 10px}
+.logbar .dd{flex:1 1 200px;min-width:190px;max-width:290px}
+.logbar .btn{align-self:center}
+.logauto{margin-left:auto;font-size:13px;opacity:.8;display:flex;align-items:center;gap:4px;cursor:pointer}
+.loginfo{font-size:12px;opacity:.6;margin-bottom:8px}
+.loglist{display:flex;flex-direction:column;gap:4px}
+.logempty{padding:28px;text-align:center;opacity:.7;border:1px dashed color-mix(in srgb,var(--fg) 20%,transparent);border-radius:10px}
+.logrow{display:grid;grid-template-columns:auto auto auto 1fr;gap:10px;align-items:start;padding:7px 10px;
+  border-radius:8px;background:color-mix(in srgb,var(--fg) 5%,transparent);
+  border-left:3px solid color-mix(in srgb,var(--fg) 25%,transparent);font-size:13px}
+.logrow .lt{opacity:.55;font-variant-numeric:tabular-nums;white-space:nowrap}
+.logrow .ll{font-size:11px;font-weight:700;letter-spacing:.04em;opacity:.9}
+.logrow .lc{font-size:11px;min-width:1px;padding:0 7px;border-radius:99px;white-space:nowrap}
+.logrow .lc:not(:empty){background:color-mix(in srgb,var(--fg) 14%,transparent);padding:1px 7px}
+.logrow .lm{min-width:0}
+.logrow .lm1{white-space:pre-wrap;word-break:break-word}
+.logrow.lv-error,.logrow.lv-critical{border-left-color:#ff5c6c;background:color-mix(in srgb,#ff5c6c 9%,transparent)}
+.logrow.lv-error .ll,.logrow.lv-critical .ll{color:#ff7886}
+.logrow.lv-warning{border-left-color:#ffb020;background:color-mix(in srgb,#ffb020 8%,transparent)}
+.logrow.lv-warning .ll{color:#ffc04d}
+.lmtg{background:none;border:0;color:var(--accent);cursor:pointer;padding:2px 0;font:inherit;font-size:12px}
+.lmore{margin:6px 0 0;padding:8px;border-radius:6px;background:color-mix(in srgb,#000 35%,transparent);
+  font-size:12px;overflow:auto;max-height:260px;white-space:pre-wrap}

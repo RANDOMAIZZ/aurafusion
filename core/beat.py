@@ -54,6 +54,7 @@ class BeatTracker:
         self.maxlen = max(96, int(self.fps * history_s))
         self.hist = np.zeros(self.maxlen, dtype=np.float32)
         self.n_hist = 0
+        self._w = 0
         self.prev_env = 0.0
         self.bpm = 0.0
         self.confidence = 0.0
@@ -106,10 +107,12 @@ class BeatTracker:
             self._pk.pop(0)
         onset_peak = float(max(self._pk) * (1.0 - 0.18 * (len(self._pk) - 1)))
 
-        self.hist[self.n_hist % self.maxlen] = onset
-        self.n_hist += 1
-        if self.n_hist > self.maxlen:
-            self.n_hist = self.maxlen
+        # настоящий кольцевой буфер: отдельный индекс записи, а n_hist — число
+        # заполненных ячеек. Раньше n_hist обрезался до maxlen, и запись после
+        # заполнения всегда шла в ячейку 0.
+        self.hist[self._w] = onset
+        self._w = (self._w + 1) % self.maxlen
+        self.n_hist = min(self.maxlen, self.n_hist + 1)
 
         self._since_est += step
         # пересчитываем темп не каждый кадр: автокорреляция на длинной истории
@@ -173,9 +176,15 @@ class BeatTracker:
         # квадрат — подчёркивает пики, глушит фон
         return float(np.mean(lo * lo) * 2.0)
 
+    def _ordered(self):
+        """История в хронологическом порядке (старое -> новое)."""
+        if self.n_hist < self.maxlen:
+            return self.hist[: self.n_hist]
+        return np.concatenate((self.hist[self._w:], self.hist[: self._w]))
+
     def _onset_threshold(self):
         """Порог «это удар, а не шум». Относительно среднего в истории."""
-        h = self.hist[: self.n_hist]
+        h = self._ordered()
         if not len(h):
             return 0.01
         return float(max(0.012, np.mean(h) * 1.35 + np.std(h) * 0.5))
@@ -189,7 +198,7 @@ class BeatTracker:
         return idx
 
     def _estimate(self):
-        h = self.hist[: self.n_hist].astype(np.float64)
+        h = self._ordered().astype(np.float64)
         n = len(h)
         if n < int(self.fps * 2.0):
             return
