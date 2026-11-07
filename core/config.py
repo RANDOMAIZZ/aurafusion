@@ -134,6 +134,10 @@ DEFAULTS = {
     # программа Skydimo (ScreenMirror), AuraFusion качает только яркость от
     # музыки; "solid" — AuraFusion красит все светодиоды одним цветом.
     "skydimo_mode": "mirror",
+    # Автопереключение сцен по активному приложению: строки «программа = сцена»
+    # (см. core/app_scenes.py), выключено по умолчанию.
+    "app_scenes_enabled": False,
+    "app_scenes": "",
     # Нижний предел яркости ленты Skydimo в режиме mirror: в тишине лента
     # показывает цвета экрана на этом уровне, а не на «мин. яркости» ПК.
     "skydimo_min_brightness": 0.35,

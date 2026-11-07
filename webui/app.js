@@ -156,6 +156,32 @@ function mkSlider(c) {
   return w;
 }
 
+/* Текстовое поле (одна строка или несколько). Значение уходит на сервер по
+   потере фокуса или Ctrl+Enter, а не на каждую букву. */
+function mkText(c) {
+  const w = tile(c.label, null, c.desc);
+  const inp = el(c.multi ? 'textarea' : 'input', 'txt');
+  if (!c.multi) inp.type = 'text';
+  if (c.multi) inp.rows = c.rows || 4;
+  if (c.placeholder) inp.placeholder = c.placeholder;
+  inp.spellcheck = false;
+  const send = () => {
+    if ((CFG[c.key] ?? '') === inp.value) return;
+    CFG[c.key] = inp.value;
+    put({ [c.key]: inp.value });
+    toast('сохранено');
+  };
+  inp.addEventListener('change', send);
+  inp.addEventListener('keydown', e => {
+    if (e.key === 'Enter' && (!c.multi || e.ctrlKey)) { e.preventDefault(); inp.blur(); }
+  });
+  w.append(inp);
+  c.el = inp;
+  c.setValue = v => { inp.value = v ?? ''; };
+  w.style.gridColumn = '1 / -1';
+  return w;
+}
+
 function mkCheck(c) {
   const w = el('div', 'tile');
   const l = el('label', 'sw');
@@ -917,13 +943,22 @@ const PAGES = {
       { t: 'check', key: 'color_all', label: 'Один цвет на все устройства', desc: 'Все устройства показывают один и тот же цвет вместо своей раскраски по зонам.' },
       { t: 'check', key: 'rgb_enabled', label: 'Подсветка ПК включена', desc: 'Главный выключатель подсветки. Выключишь — погаснут все устройства сразу.' },
     ]},
+    { g: 'Лента Skydimo', desc: 'Адресная лента Skydimo через расширение. Нужна программа Skydimo в полном (или тихом) режиме.', items: [
+      { t: 'select', key: 'skydimo_mode', label: 'Режим ленты', wide: true, options: [
+        ['Цвет по краям экрана считает Skydimo, яркость — от музыки', 'mirror'],
+        ['Один цвет на всю ленту, как у остальных устройств', 'solid']],
+        desc: 'mirror — эффект ScreenMirror самой Skydimo (адресно по краям экрана), AuraFusion меняет только яркость в такт музыке. solid — AuraFusion красит все светодиоды одним цветом.' },
+      { t: 'slider', key: 'skydimo_min_brightness', label: 'Мин. яркость ленты Skydimo', min: 0, max: 95, div: 100, desc: 'Нижний уровень яркости ленты Skydimo. В тишине лента показывает цвета экрана на этом уровне, на музыке пульсирует выше. 0 — лента может гаснуть почти полностью.' },
+    ] },
+    { g: 'OpenRGB', desc: 'Где лежит OpenRGB.exe. Пусто — искать рядом с программой и в Program Files.', items: [
+      { t: 'text', key: 'openrgb_path', label: 'Путь к OpenRGB.exe', placeholder: 'C:/Program Files/OpenRGB/OpenRGB.exe', desc: 'Полный путь к OpenRGB.exe, если он не в обычном месте. Применяется при следующем запуске AuraFusion.' },
+    ] },
     { g: 'Пульс от баса', desc: 'Яркость ПК качается музыкой: импульс, атака, затухание, границы.', items: [
       { t: 'slider', key: 'pulse_threshold', label: 'Порог импульса', min: 0, max: 50, div: 100, desc: 'С какой громкости баса начинается импульс. Ниже порога ПК только качается в такт, но не вспыхивает.' },
       { t: 'slider', key: 'pulse_gain', label: 'Усиление импульса', min: 20, max: 300, div: 100, desc: 'Насколько сильно вспыхивает ПК на импульсе.' },
       { t: 'slider', key: 'attack_s', label: 'Атака (с)', min: 1, max: 30, div: 100, desc: 'За сколько секунд яркость набирается. Меньше — вспышка резче.' },
       { t: 'slider', key: 'release_s', label: 'Затухание (с)', min: 5, max: 150, div: 100, desc: 'За сколько секунд яркость падает обратно. Меньше — вспышка короче.' },
       { t: 'slider', key: 'min_brightness', label: 'Мин. яркость', min: 0, max: 50, div: 100, desc: 'Ниже этого уровня подсветка не гаснет совсем: на тихой музыке ПК всё равно чуть светится.' },
-      { t: 'slider', key: 'skydimo_min_brightness', label: 'Мин. яркость ленты Skydimo', min: 0, max: 95, div: 100, desc: 'Нижний уровень яркости ленты Skydimo. В тишине лента показывает цвета экрана на этом уровне, на музыке пульсирует выше. 0 — лента может гаснуть почти полностью.' },
       { t: 'slider', key: 'max_brightness', label: 'Макс. яркость', min: 20, max: 100, div: 100, desc: 'Потолок яркости. Ниже — подсветка никогда не выкручивается на полную.' },
       { t: 'slider', key: 'bass_boost', label: 'Усиление баса', min: 30, max: 300, div: 100, desc: 'Насколько сильно подсветка реагирует на низкие частоты.' },
       { t: 'slider', key: 'abs_floor', label: 'Порог тишины, %', min: 0, max: 100, div: 1000, scale: 100, desc: 'Ниже этой громкости музыка считается тишиной, и подсветка держит минимальную яркость, а не пульсирует. Поднимается, если подсветка дёргается на тихих местах.' },
@@ -994,6 +1029,8 @@ const PAGES = {
     ]},
     { g: 'Сцены', desc: 'Наборы настроек под то, что вы делаете. Одно нажатие переносит сразу всё: режим цвета, силу эффектов, прозрачность оверлея.', items: [
       { t: 'scenes' },
+      { t: 'check', key: 'app_scenes_enabled', label: 'Сцены по активному приложению', desc: 'Раз в 2 секунды смотрит, какая программа на переднем плане, и включает сцену по правилам ниже. Переключает только при смене программы, поэтому ручной выбор сцены не сбивается.' },
+      { t: 'text', key: 'app_scenes', multi: true, rows: 4, label: 'Правила: программа = сцена', placeholder: 'cs2.exe = game\nvlc.exe = movie\n* = work', desc: 'По строке на программу. Сцены: game, movie, work, party, calm, off или свои. «*» — для всех остальных программ. «.exe» можно не писать. Сохраняется по потере фокуса или Ctrl+Enter.' },
     ]},
     { g: 'Оформление', desc: 'Цвета интерфейса. На саму подсветку и звук не влияет.', items: [
       { t: 'themes' },
@@ -1063,7 +1100,7 @@ function buildControl(c) {
     if (c.id) h.id = c.id;
     return h;
   }
-  const node = { select: mkSelect, slider: mkSlider, check: mkCheck, color: mkColor }[c.t](c);
+  const node = { select: mkSelect, slider: mkSlider, check: mkCheck, color: mkColor, text: mkText }[c.t](c);
   c._node = node;
   if (c.id) { CTLS[c.id] = c; node.id = c.id; }
   if (c.span2 || c.wide) node.style.gridColumn = '1 / -1';

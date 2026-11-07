@@ -549,3 +549,11 @@ select:hover{border-color:var(--muted);}
 .lmtg{background:none;border:0;color:var(--accent);cursor:pointer;padding:2px 0;font:inherit;font-size:12px}
 .lmore{margin:6px 0 0;padding:8px;border-radius:6px;background:color-mix(in srgb,#000 35%,transparent);
   font-size:12px;overflow:auto;max-height:260px;white-space:pre-wrap}
+
+
+/* ---------- текстовые поля в плитках ---------- */
+.tile .txt{width:100%;box-sizing:border-box;margin-top:8px;padding:8px 10px;border-radius:8px;
+  background:color-mix(in srgb,var(--fg) 7%,transparent);color:var(--fg);
+  border:1px solid color-mix(in srgb,var(--fg) 16%,transparent);font:inherit;font-size:13px;resize:vertical}
+.tile textarea.txt{font-family:ui-monospace,Consolas,monospace;line-height:1.45}
+.tile .txt:focus{outline:none;border-color:var(--accent)}

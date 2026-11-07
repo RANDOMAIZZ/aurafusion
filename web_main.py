@@ -1209,6 +1209,31 @@ def _panel_timer(core, app):
     return t
 
 
+def _app_scene_timer(core, app):
+    """Раз в 2 с смотрит активное приложение и применяет сцену по правилам
+    app_scenes. Переключение — только при смене приложения."""
+    from core.app_scenes import AppSceneSwitcher, foreground_exe
+    sw = AppSceneSwitcher()
+    t = QTimer(app)
+
+    def poll():
+        try:
+            if not core.cfg.get("app_scenes_enabled"):
+                sw.step(core.cfg, "")
+                return
+            sid = sw.step(core.cfg, foreground_exe())
+            if sid:
+                res = apply_scene(core, sid)
+                log.info("сцена по приложению %s: %s%s", sw.last_exe, sid,
+                         "" if res is not None else " (такой сцены нет)")
+        except Exception:
+            log.exception("сцены по приложениям")
+
+    t.timeout.connect(poll)
+    t.start(2000)
+    return t
+
+
 def _watchdog(core, app, httpd):
     """Сторож: поднимает то, что перестало работать, и пишет об этом в лог.
 
@@ -1398,6 +1423,7 @@ def main():
                      name="aura-web").start()
     _watchdog(core, app, httpd)
     _panel_timer(core, app)
+    _app_scene_timer(core, app)
     url = f"http://{host}:{port}/"
     log.info("web ui: %s", url)
     print(f"[AuraFusion web] {url}  (Ctrl+C — выход)")
