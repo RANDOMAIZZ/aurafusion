@@ -16,7 +16,6 @@ import gc
 import logging
 import os
 import queue
-import re
 import socket
 import sys
 import threading
@@ -26,229 +25,7 @@ import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
-from PySide6.QtCore import Qt, QBuffer
-from PySide6.QtGui import QAction, QColor, QIcon, QPainter, QPixmap, QPen
-from PySide6.QtWidgets import QApplication, QMenu, QSystemTrayIcon
-
-
-# Цвета состояния компонента в значке трея.
-LEVEL_COLORS = {
-    "ok": (60, 220, 110),      # работает
-    "warn": (255, 190, 50),    # подключается / частично
-    "bad": (255, 70, 70),      # не работает
-    "off": (95, 100, 112),     # выключено или не настроено
-}
-
-
-def tray_icon(app=None, levels=None):
-    """Значок AuraFusion для трея: кольцо из трёх дуг.
-
-    Без аргументов дуги переливаются цветами RGB (так значок рисуется для
-    вкладки браузера). С `levels` — кортежем из трёх состояний
-    ("ok" | "warn" | "bad" | "off") для OpenRGB, ленты и звука — каждая дуга
-    красится в цвет своего компонента, и по трею видно, что работает.
-
-    Рисуем кодом, а не грузим файл: рядом может не оказаться ни одного
-    .ico, а значок в трее нужен всегда, когда панель живёт в браузере, —
-    иначе процесс нечем остановить, кроме как через диспетчер задач."""
-    pm = QPixmap(64, 64)
-    pm.fill(QColor(0, 0, 0, 0))
-    p = QPainter(pm)
-    p.setRenderHint(QPainter.Antialiasing, True)
-    p.setBrush(QColor(16, 20, 26, 235))
-    p.setPen(QColor(0, 220, 255, 255) if levels is None else QColor(70, 80, 95, 255))
-    p.drawEllipse(2, 2, 60, 60)
-    # Углы drawArc берутся в 1/16 градуса, поэтому множитель 16 на обоих.
-    p.setBrush(QColor(0, 0, 0, 0))
-    default = (QColor(255, 40, 90), QColor(40, 255, 120), QColor(60, 140, 255))
-    for i in range(3):
-        if levels is None:
-            col = default[i]
-        else:
-            col = QColor(*LEVEL_COLORS.get(levels[i], LEVEL_COLORS["off"]))
-        pen = QPen(col)
-        pen.setWidth(7)
-        pen.setCapStyle(Qt.RoundCap)
-        p.setPen(pen)
-        p.drawArc(12, 12, 40, 40, -(112 + 120 * i) * 16, 88 * 16)
-    p.end()
-    return QIcon(pm)
-
-
-_ICON_PNG = {}   # размер -> байты PNG
-
-
-def icon_png(size=64):
-    """PNG того же значка, что и в трее.
-
-    Отдельный файл с картинкой разъехался бы со значком при первой же правке
-    одного из двух, поэтому браузер получает ровно то, что рисует
-    tray_icon().
-
-    Рисуем в главном потоке и складываем в кэш: QPixmap из потока обработчика
-    HTTP трогать нельзя, а картинка всё равно не меняется — цвета в значке
-    заданы константами, не берутся от ленты.
-    """
-    key = int(size)
-    if key in _ICON_PNG:
-        return _ICON_PNG[key]
-    buf = QBuffer()
-    buf.open(QBuffer.ReadWrite)
-    try:
-        pix = tray_icon().pixmap(key, key)
-        ok = pix.save(buf, "PNG")
-        data = bytes(buf.data()) if ok else b""
-    finally:
-        buf.close()
-    _ICON_PNG[key] = data
-    return data
-
-
-def component_status(core):
-    """Состояние трёх компонентов: OpenRGB, лента, звук.
-
-    Возвращает {"openrgb": (уровень, текст), "strip": ..., "audio": ...},
-    уровень — "ok" / "warn" / "bad" / "off". Читаются только простые
-    атрибуты, поэтому безопасно звать из потока Qt по таймеру."""
-    cfg = core.cfg
-    devs = cfg.get("devices", {}) or {}
-    en = {n: d for n, d in devs.items() if isinstance(d, dict) and d.get("enabled", True)}
-
-    # --- OpenRGB ---
-    orgb = [n for n, d in en.items() if d.get("transport") not in ("ble", "skydimo")]
-    eng = core.rgb_engine
-    if not orgb:
-        o = ("off", "нет устройств в настройках")
-    elif eng is None or not core.state.get("running_rgb"):
-        o = ("off", "подсветка остановлена")
-    elif eng.conn is None:
-        o = ("bad", "сервер OpenRGB недоступен")
-    elif core.state.get("error"):
-        o = ("warn", "часть устройств недоступна")
-    else:
-        o = ("ok", "подключён, устройств: %d" % len(orgb))
-
-    # --- лента (BLE и Skydimo) ---
-    strips = [(n, d) for n, d in en.items() if d.get("transport") in ("ble", "skydimo")]
-    if not strips:
-        t = ("off", "ленты не настроены")
-    else:
-        ble = _ble_state()
-        up, total = 0, len(strips)
-        for n, d in strips:
-            if d.get("transport") == "skydimo":
-                svc = core.svcd
-                if svc is not None and getattr(svc, "client_connected", False):
-                    up += 1
-            else:
-                addr = str(d.get("addr", "") or "").upper()
-                if (ble.get(addr) or {}).get("connected"):
-                    up += 1
-        if not core.state.get("running_rgb"):
-            t = ("off", "подсветка остановлена")
-        elif up == total:
-            t = ("ok", "подключено: %d из %d" % (up, total))
-        elif up:
-            t = ("warn", "подключено: %d из %d" % (up, total))
-        else:
-            t = ("bad", "не подключена")
-
-    # --- звук ---
-    ast = str(getattr(core.audio, "status", "") or "")
-    low = ast.lower()
-    if low.startswith("loopback") or low == "demo":
-        a = ("ok", ("демо" if low == "demo" else "захват идёт")
-             + (", играет" if getattr(core.audio, "has_signal", False) else ", тихо"))
-    elif low in ("init", "") or "переподключ" in low:
-        a = ("warn", ast or "запуск")
-    else:
-        a = ("bad", ast[:60])
-    return {"openrgb": o, "strip": t, "audio": a}
-
-
-class Tray(QSystemTrayIcon):
-    """Значок в трее: открыть панель, показать/спрятать оверлей, остановить всё.
-
-    Без него процесс с панелью в браузере нечем было закрыть, кроме диспетчера
-    задач, а закрывать его надо аккуратно: конфиг сохраняется, лента BLE
-    отпускается, поток RGB останавливается. Выход из трея идёт через
-    app.quit(), а тот вызывает aboutToQuit — то есть тот же путь, что у
-    Ctrl+C в консоли, со всеми очистками."""
-    def __init__(self, app, url, core, parent=None):
-        super().__init__(parent)
-        self._app = app
-        self._url = url
-        self._core = core
-        self.setIcon(tray_icon())
-        self.setToolTip("AuraFusion")
-        self.activated.connect(self._on_activated)
-
-        m = QMenu()
-        # три строки состояния сверху меню: то же, что и цвет дуг значка
-        self._st_actions = []
-        for _ in range(3):
-            a_st = QAction("…", m)
-            a_st.setEnabled(False)
-            m.addAction(a_st)
-            self._st_actions.append(a_st)
-        m.addSeparator()
-        a_open = QAction("Открыть панель", m)
-        a_open.triggered.connect(self.open_panel)
-        m.addAction(a_open)
-        self.a_ovl = QAction("Скрыть оверлей", m)
-        self.a_ovl.triggered.connect(self.toggle_overlay)
-        m.addAction(self.a_ovl)
-        m.addSeparator()
-        a_quit = QAction("Остановить всё", m)
-        a_quit.triggered.connect(self.quit_all)
-        m.addAction(a_quit)
-        self._menu = m
-        self.setContextMenu(m)
-        self._levels = None
-        self._timer = QTimer(self)
-        self._timer.timeout.connect(self.refresh_status)
-        self._timer.start(2000)
-        self.refresh_status()
-
-    def refresh_status(self):
-        """Перекрасить значок и обновить подсказку по состоянию компонентов."""
-        try:
-            st = component_status(self._core)
-        except Exception:
-            log.exception("tray status")
-            return
-        levels = (st["openrgb"][0], st["strip"][0], st["audio"][0])
-        if levels != self._levels:
-            self._levels = levels
-            self.setIcon(tray_icon(levels=levels))
-        names = (("OpenRGB", st["openrgb"]), ("Лента", st["strip"]), ("Звук", st["audio"]))
-        mark = {"ok": "●", "warn": "◐", "bad": "○", "off": "–"}
-        lines = ["%s %s: %s" % (mark[v[0]], n, v[1]) for n, v in names]
-        for act, line in zip(self._st_actions, lines):
-            act.setText(line)
-        self.setToolTip("AuraFusion" + chr(10) + chr(10).join(lines))
-
-    def open_panel(self):
-        try:
-            webbrowser.open(self._url)
-        except Exception:
-            pass
-
-    def toggle_overlay(self):
-        # core.toggle_overlay сам ходит через GuiBridge — из трея мы в главном
-        # потоке, но единый путь всё равно надёжнее
-        try:
-            vis = self._core.toggle_overlay()
-            self.a_ovl.setText("Скрыть оверлей" if vis else "Показать оверлей")
-        except Exception:
-            pass
-
-    def quit_all(self):
-        self._app.quit()
-
-    def _on_activated(self, reason):
-        if reason in (QSystemTrayIcon.Trigger, QSystemTrayIcon.DoubleClick):
-            self.open_panel()
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon
 
 
 class GuiBridge(QObject):
@@ -287,66 +64,13 @@ from core.screen_color import ScreenColor
 from core.rgb_engine import (RGBEngine, hex_to_rgb, scale_color, kick_devices,
                              is_ble_target)
 from ui.overlay import Overlay
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-def openrgb_candidates(extra=""):
-    """Где искать OpenRGB.exe: путь из настроек (openrgb_path), переменная
-    окружения AURAFUSION_OPENRGB, папка OpenRGB рядом с программой и обычные
-    места установки. Личных путей в коде нет."""
-    pf = os.environ.get("ProgramFiles", r"C:\Program Files")
-    local = os.environ.get("LOCALAPPDATA", "")
-    return [c for c in (
-        extra,
-        os.environ.get("AURAFUSION_OPENRGB", ""),
-        os.path.join(BASE_DIR, "OpenRGB", "OpenRGB.exe"),
-        os.path.join(pf, "OpenRGB", "OpenRGB.exe"),
-        os.path.join(local, "Programs", "OpenRGB", "OpenRGB.exe") if local else "",
-    ) if c]
-
-
-def find_openrgb(extra=""):
-    for p in openrgb_candidates(extra):
-        if os.path.isfile(p):
-            return p
-    return None
-
-
-def launch_openrgb(host, port, path=""):
-    """Поднять сервер OpenRGB, если его ещё нет.
-
-    Раньше эта функция жила в десктопном main.py, а веб импортировал её
-    оттуда. Стоило удалить main.py — и веб перестал запускаться совсем."""
-    import subprocess
-    exe = find_openrgb(path)
-    if not exe:
-        return False
-    try:
-        out = subprocess.run(["tasklist", "/fi", "IMAGENAME eq OpenRGB.exe"],
-                             capture_output=True, text=True, timeout=10,
-                             creationflags=NO_WINDOW).stdout
-        if "OpenRGB.exe" in out:
-            return True
-    except Exception:
-        pass
-    try:
-        orgb_log = os.path.join(BASE_DIR, "openrgb_stdout.log")
-        _rotate_file(orgb_log, 1_000_000)
-        out_f = open(orgb_log, "ab", buffering=0)
-        subprocess.Popen([exe, "--server", "--server-host", host,
-                          "--server-port", str(port), "--startminimized"],
-                         stdout=out_f, stderr=subprocess.STDOUT,
-                         creationflags=subprocess.DETACHED_PROCESS
-                         | subprocess.CREATE_NEW_PROCESS_GROUP | 0x00004000
-                         | NO_WINDOW)
-        return True
-    except Exception as e:
-        log.error("openrgb launch: %s", e)
-        return False
-
+from ui.tray import Tray, icon_png
+from core.status import _ble_state, _ble_for
+from core.logs import CRASH_PATH, LOG_PATH, read_logs, rotate_file
+from core.openrgb_launcher import NO_WINDOW, launch_openrgb
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 WEB_DIR = os.path.join(BASE_DIR, "webui")
-LOG_PATH = os.path.join(BASE_DIR, "aurafusion.log")
 # Лог с ротацией: до 1 МБ на файл и три прошлых (aurafusion.log.1 … .3).
 # Раньше он рос без ограничения — за пару дней набегало больше мегабайта,
 # и в нём тонули настоящие ошибки.
@@ -356,26 +80,13 @@ _lh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 logging.basicConfig(level=logging.INFO, handlers=[_lh])
 
 
-def _rotate_file(path, limit, keep=1):
-    """Простая ротация для файлов, в которые пишет не logging (crash.log,
-    вывод OpenRGB): если файл больше limit — отодвинуть в path.1."""
-    try:
-        if os.path.isfile(path) and os.path.getsize(path) > limit:
-            for i in range(keep, 0, -1):
-                src = path if i == 1 else "%s.%d" % (path, i - 1)
-                dst = "%s.%d" % (path, i)
-                if os.path.isfile(src):
-                    os.replace(src, dst)
-    except Exception:
-        pass
 log = logging.getLogger("aurafusion.web")
 
 # Дамп при падении — в отдельный файл, потому что обычный лог при 0xc0000005
 # обрывается на полуслове: процесс умирает, не дописав ни строчки.
 # Происходило это с pythonw в python314.dll без внятной причины, и без этого
 # файла каждый раз оставалось только «процесс умер, в логе пусто».
-CRASH_PATH = os.path.join(BASE_DIR, "crash.log")
-_rotate_file(CRASH_PATH, 512_000)
+rotate_file(CRASH_PATH, 512_000)
 try:
     _crash = open(CRASH_PATH, "a", buffering=1, encoding="utf-8")
     faulthandler.enable(file=_crash, all_threads=True)
@@ -873,32 +584,6 @@ class Core:
         return out
 
 
-def _ble_state():
-    """Что сейчас с каждой BLE-лентой: адрес -> подключена ли и что за ошибка."""
-    out = {}
-    try:
-        from core import ble_strip
-        for addr, st in list(getattr(ble_strip, "_registry", {}).items()):
-            out[addr] = {"connected": bool(getattr(st, "connected", False)),
-                         "error": str(getattr(st, "error", "") or "")}
-    except Exception:
-        pass
-    return out
-
-
-def _ble_for(cfg_devs, name, ble_state):
-    """Состояние ленты для конкретного устройства из списка."""
-    info = cfg_devs.get(name) or {}
-    addr = str(info.get("addr", "") or info.get("address", "")).upper()
-    st = ble_state.get(addr) or {}
-    return {"addr": addr,
-            "connected": bool(st.get("connected")),
-            "error": st.get("error", ""),
-            # лента не трогает GATT, пока нечего посылать, поэтому «не
-            # подключена» при пустом цене — это норма, а не поломка
-            "idle": not addr}
-
-
 ACTIONS = {}
 
 
@@ -950,68 +635,6 @@ def style_profiles():
 
 
 _STYLE_PROFILES = None
-
-
-_LOG_RE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d),\d+ (DEBUG|INFO|WARNING|ERROR|CRITICAL) (.*)$")
-_LOG_LEVELS = {
-    "errors": ("ERROR", "CRITICAL"),
-    "problems": ("WARNING", "ERROR", "CRITICAL"),
-    "all": None,
-}
-
-
-def read_logs(level="problems", limit=200, source="app"):
-    """Последние записи лога для страницы «Логи» в панели.
-
-    Читается хвост файла (до ~600 КБ), строки без метки времени (трейсбеки)
-    приклеиваются к предыдущей записи, подряд идущие одинаковые сообщения
-    схлопываются в одну со счётчиком — иначе одно и то же «лента не отвечает»
-    занимает весь экран. Новые записи идут первыми."""
-    path = {"app": LOG_PATH, "crash": CRASH_PATH,
-            "openrgb": os.path.join(BASE_DIR, "openrgb_stdout.log")}.get(source, LOG_PATH)
-    try:
-        limit = max(10, min(1000, int(limit)))
-    except (TypeError, ValueError):
-        limit = 200
-    out = {"source": source, "level": level, "path": os.path.basename(path),
-           "size": 0, "entries": []}
-    try:
-        size = os.path.getsize(path)
-        out["size"] = size
-        with open(path, "rb") as f:
-            if size > 600_000:
-                f.seek(size - 600_000)
-                f.readline()            # первая строка могла обрезаться
-            text = f.read().decode("utf-8", "replace")
-    except OSError:
-        return out
-    if source != "app":
-        # у crash.log и вывода OpenRGB нет формата logging — отдаём как есть
-        lines = text.splitlines()[-limit:]
-        out["entries"] = [{"t": "", "level": "INFO", "msg": ln, "count": 1}
-                          for ln in reversed(lines) if ln.strip()]
-        return out
-    allowed = _LOG_LEVELS.get(level, _LOG_LEVELS["problems"])
-    recs = []
-    for ln in text.splitlines():
-        m = _LOG_RE.match(ln)
-        if m:
-            recs.append({"t": m.group(1), "level": m.group(2), "msg": m.group(3), "count": 1})
-        elif recs and ln.strip():
-            recs[-1]["msg"] += chr(10) + ln
-    entries = []
-    for r in recs:
-        if allowed is not None and r["level"] not in allowed:
-            continue
-        if entries and entries[-1]["level"] == r["level"] and entries[-1]["msg"] == r["msg"]:
-            entries[-1]["count"] += 1
-            entries[-1]["t_last"] = r["t"]
-            continue
-        entries.append(r)
-    entries.reverse()
-    out["entries"] = entries[:limit]
-    out["total"] = len(entries)
-    return out
 
 
 class Handler(BaseHTTPRequestHandler):

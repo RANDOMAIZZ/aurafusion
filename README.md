@@ -297,7 +297,7 @@ start_aurafusion.bat stop            остановить
 
 | Файл | Роль |
 |---|---|
-| `web_main.py` | точка входа: HTTP + SSE, значок в трее, сторожа, запуск всего |
+| `web_main.py` | точка входа: HTTP + SSE, ядро приложения, сторожа, запуск всего |
 | `core/audio_engine.py` | WASAPI loopback → FFT → полосы, уровень, бас |
 | `core/screen_color.py` | цвет с экрана (`juicy`, `average`, `kmeans`), сглаживание |
 | `core/rgb_engine.py` | общий конвейер цвета и яркости, пинки режима, приёмники устройств |
@@ -308,7 +308,12 @@ start_aurafusion.bat stop            остановить
 | `core/openrgb_raw.py` | быстрые кадры в OpenRGB напрямую по протоколу |
 | `core/scenes.py` | готовые сцены и фильтр безопасных ключей |
 | `core/autostart.py` | автозапуск через реестр |
-| `ui/overlay.py` | оверлей (физика искр, отрисовка) |
+| `ui/overlay.py` | оверлей: окно, замер цвета, 15 стилей фигур |
+| `ui/sparks.py` | стиль «искры»: физика частиц и отрисовка |
+| `ui/tray.py` | значок в трее с цветом состояния |
+| `core/status.py` | состояние OpenRGB, ленты и звука |
+| `core/logs.py` | пути журналов, ротация, чтение для страницы «Логи» |
+| `core/openrgb_launcher.py` | поиск и запуск сервера OpenRGB |
 | `webui/` | панель: чистые HTML, JS и CSS |
 | `tools/` | стенды и проверки, расширение для Skydimo |
 
