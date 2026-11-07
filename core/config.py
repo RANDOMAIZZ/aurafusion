@@ -204,6 +204,7 @@ FLOAT_KEYS = {
     "spark_glow_start": (0.0, 1.0),
     "spark_glow_end": (0.0, 1.0),
     "spark_sensitivity": (0.25, 4.0),
+    "spark_speed": (0.01, 2.0),
     "spark_height_tint": (0.0, 1.0),
     "spark_trail": (0.0, 1.0),
     "min_brightness": (0.0, 1.0),
