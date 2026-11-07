@@ -137,14 +137,14 @@ DEFAULTS = {
     # Нижний предел яркости ленты Skydimo в режиме mirror: в тишине лента
     # показывает цвета экрана на этом уровне, а не на «мин. яркости» ПК.
     "skydimo_min_brightness": 0.35,
-    "skydimo_com": "COM4",   # COM-порт ленты Skydimo в запросе set-led
+  # COM-порт ленты Skydimo в запросе set-led
     "rgb_fps": 30,
     "bass_boost": 1.6,
     "attack_s": 0.05, "release_s": 0.4, "avg_s": 2.0,
     "pulse_threshold": 0.10, "pulse_gain": 1.3,
     "abs_floor": 0.004, "gamma": 1.0,
     "min_brightness": 0.02, "max_brightness": 1.0,
-    "startup_delay_s": 20, "idle_fps": 5, "send_threshold": 0.004, "reassert_min": 0,
+    "startup_delay_s": 20, "idle_fps": 5, "send_threshold": 0.004,
     "mode_kick": True,  # авто-кик режима GPU при старте (лечит залипший Direct)
     # --- BLE-лента (ELK-BLEDOM/BLEDDM) как обычное устройство подсветки ---
     "ble_enabled": True,    # сканировать BLE-ленты рядом
@@ -165,7 +165,7 @@ DEFAULTS = {
 INT_KEYS = {
     "overlay_fps", "rgb_fps", "bars", "line_width", "alpha", "fill_alpha", "line_count",
     "chunk", "monitor", "color_monitor", "idle_fps", "color_sample_ms",
-    "ble_max_fps", "color_hold", "dark_threshold", "reassert_min",
+    "ble_max_fps", "color_hold", "dark_threshold",
 }
 
 # Дробные ключи. Их нельзя класть в INT_KEYS: int() от 0.35 даёт 0, и
@@ -206,7 +206,7 @@ FLOAT_KEYS = {
 # Строковые ключи, которые по ошибке тоже попали в INT_KEYS: int(float())
 # на «#C50DF1» падает, обработчик проглатывал исключение и молча возвращал
 # значение по умолчанию — выбранный цвет просто не сохранялся.
-STR_KEYS = {"skydimo_mode", "skydimo_com", "static_color", "color_source_gpu", "color_source_ble"}
+STR_KEYS = {"skydimo_mode", "static_color", "color_source_gpu", "color_source_ble"}
 
 
 def coerce_patch(patch):

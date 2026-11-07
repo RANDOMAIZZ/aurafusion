@@ -501,7 +501,6 @@ class Core:
 
         self.audio = SharedAudio(lambda: self.cfg, n_bars=self.cfg.get("bars", 64))
         self.sc = ScreenColor(lambda: self.cfg)
-        self.skydimo = None  # SkydimoClient поднимается при старте RGB, если лента найдена
         self.svcd = None     # TCP-сервер кадров для Lua-расширения skydimo-ext
         # мост создаётся в главном потоке Qt — там же, где живёт event loop,
         # поэтому его сигналы доставляются без блокировки
@@ -590,17 +589,6 @@ class Core:
         if self.state.get("running_rgb"):
             return False
         self.state["running_rgb"] = True
-        # SkydimoClient поднимаем здесь. Любая ошибка ленты не должна
-        # мешать старту общей подсветки: раньше исключение здесь убивало
-        # start_rgb целиком и переставала реагировать ВСЯ подсветка.
-        if self.skydimo is None:
-            try:
-                from core.skydimo import SkydimoClient
-                self.skydimo = SkydimoClient(log=log.info, com_port=self.cfg.get("skydimo_com", "COM4"))
-                self.skydimo.start()
-            except Exception as e:
-                log.warning("skydimo start failed: %s", e)
-                self.skydimo = None
         if self.svcd is None:
             try:
                 from core.skydimo_ext import ExtensionServer
@@ -611,7 +599,7 @@ class Core:
                 self.svcd = None
         self.rgb_engine = RGBEngine(lambda: self.cfg, self.audio, self.sc,
                                     self.state, self.targets, initial_delay=delay,
-                                    log=log.info, skydimo=self.skydimo,
+                                    log=log.info,
                                     ext=self.svcd)
         self.rgb_engine.start()
         return True
@@ -622,12 +610,6 @@ class Core:
                 self.rgb_engine.stop_flag.set()
         except Exception:
             pass
-        if self.skydimo is not None:
-            try:
-                self.skydimo.stop()
-            except Exception:
-                pass
-            self.skydimo = None
         if self.svcd is not None:
             try:
                 self.svcd.stop()
@@ -722,21 +704,6 @@ class Core:
                         log.info("BLE strip found: %s %s", nm, addr)
             except Exception as e:
                 log.warning("BLE scan failed: %s", e)
-            # Skydimo SK0L27 — oficiales'naya programma otkryvaet WebSocket
-            # na 127.0.0.1:55489. Provyerjayem, zhiv li server.
-            if self.cfg.get("ble_enabled", True):
-                try:
-                    test = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                    test.settimeout(2.0)
-                    test.connect(("127.0.0.1", 55489))
-                    test.sendall(b"GET / HTTP/1.1\r\nHost: 127.0.0.1:55489\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n")
-                    resp = test.recv(512)
-                    test.close()
-                    if b"101 Switching Protocols" in resp:
-                        devs["Skydimo SK0L27"] = [("STRIP", 96)]
-                        log.info("Skydimo SK0L27 found via WebSocket 127.0.0.1:55489")
-                except Exception:
-                    pass
             if openrgb_raw.wait_for_server(self.cfg.get("openrgb_host", "127.0.0.1"),
                                            int(self.cfg.get("openrgb_port", 6742)),
                                            timeout=30.0, step=2.0):

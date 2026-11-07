@@ -334,7 +334,7 @@ def is_ble_target(t):
 
 
 def is_skydimo_target(t):
-    """Skydimo SK0L27 через WebSocket oficial'noy programma (transport='skydimo')."""
+    """Лента Skydimo SK0L27 через расширение для Skydimo (transport='skydimo')."""
     return str(t.get("transport", "")).lower() == "skydimo"
 
 
@@ -376,7 +376,7 @@ class BleSink:
 
 class RGBEngine(threading.Thread):
     def __init__(self, cfg_getter, audio, screencolor, state, targets_fn,
-                 initial_delay=0.0, log=None, skydimo=None, ext=None):
+                 initial_delay=0.0, log=None, ext=None):
         super().__init__(daemon=True)
         self._cfg = cfg_getter
         self.audio = audio
@@ -387,7 +387,6 @@ class RGBEngine(threading.Thread):
         self.log = log or (lambda *a: None)
         self.stop_flag = threading.Event()
         self.conn = None
-        self.skydimo = skydimo
         self.ext = ext
         self._targets = None
         self._sig = None
@@ -537,7 +536,7 @@ class RGBEngine(threading.Thread):
                                 resolved.append((t, self._make_ble_sink(t, cfg)))
                             elif is_skydimo_target(t):
                                 # Skydimo SK0L27 — через WebSocket, не OpenRGB.
-                                # Sink не нужен: цвет уходит через self.skydimo.
+                                # Sink не нужен: цвет уходит через расширение (self.ext).
                                 resolved.append((t, None))
                             else:
                                 tt = dict(t)
@@ -644,17 +643,12 @@ class RGBEngine(threading.Thread):
                                 n = int(t.get("leds", 96))
                                 skydimo_cols.extend([final] * n)
                         if skydimo_cols:
-                            # painting via Lua extension (tcp 8766 -> skydimo-core)
+                            # кадры уходят в расширение Skydimo (tcp 8766)
                             if self.ext is not None:
                                 try:
                                     self.ext.push(skydimo_cols)
                                 except Exception as ee:
                                     self.log("rgb: skydimo-ext fail: %s", ee)
-                            if self.skydimo:
-                                try:
-                                    self.skydimo.set_colors(skydimo_cols)
-                                except Exception as es:
-                                    self.log("rgb: сбой Skydimo: %s", es)
                         last_sig = (prev, tuple(cols))
                         last_send_t = now_m
                     except Exception as e:
@@ -714,7 +708,7 @@ class RGBEngine(threading.Thread):
                 pass
             for _t, sink in (self._targets or []):
                 if sink is None:
-                    continue  # Skydimo: закрывает общий SkydimoClient
+                    continue  # Skydimo: приёмника нет, кадры идут через расширение
                 try:
                     sink.close()
                 except Exception:

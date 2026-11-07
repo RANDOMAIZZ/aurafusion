@@ -304,7 +304,7 @@ start_aurafusion.bat stop            остановить
 | `core/beat.py` | детектор темпа и фазы доли |
 | `core/ble_strip.py` | протокол и транспорт BLE-ленты (`7E LEN CMD … EF`, сервис `FFF0`) |
 | `core/skydimo_ext.py` | TCP-сервер для расширения Skydimo |
-| `core/skydimo.py` | запасной путь через WebSocket программы Skydimo |
+| `core/capture.py` | захват экрана через DXGI (dxcam), сэмпл кадра |
 | `core/openrgb_raw.py` | быстрые кадры в OpenRGB напрямую по протоколу |
 | `core/scenes.py` | готовые сцены и фильтр безопасных ключей |
 | `core/autostart.py` | автозапуск через реестр |
