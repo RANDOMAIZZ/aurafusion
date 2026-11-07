@@ -2564,7 +2564,11 @@ class Overlay(QWidget):
                 # по силе сохраняется и у самого потолка.
                 ceil_px = max(30.0, burst_h * H)
                 h_px = ceil_px * float(np.tanh(h_px / ceil_px))
-            h_px = float(np.clip(h_px, 12.0, 0.97 * y_base))
+            # Потолок экрана тоже мягкий: при жёстком срезе сильные искры
+            # с разбросом упирались в одну высоту и рисовали ровную полосу
+            # под верхним краем. tanh сжимает их у потолка, не выравнивая.
+            top = 0.97 * y_base
+            h_px = float(np.clip(top * np.tanh(h_px / max(1.0, top)), 12.0, top))
             # Вершина баллистики = vy^2 / (2 g spd), отсюда и скорость вылета.
             # От spd высота не зависит — ползунок скорости меняет только время
             # полёта: быстрее/медленнее долетает на ту же высоту.
@@ -2832,36 +2836,52 @@ class Overlay(QWidget):
         base_op = p.opacity()
         # масштаб ореола: при glow=1 в самой освещённой зоне ~3 радиуса ядра
         n_p = int(alive.size)
+        # Всё, что нужно в цикле, считается массивами заранее и переводится в
+        # обычные списки Python: обращение к numpy-скаляру по индексу и float()
+        # на нём стоили больше самой отрисовки. Спрайты берутся один раз на
+        # уникальный цвет, а не на частицу. Пакетной отрисовки
+        # (drawPixmapFragments для массива) в PySide6 нет — привязка принимает
+        # только один фрагмент, — поэтому ускоряем сам цикл.
+        q = np.clip(pc, 0, 255).astype(np.int32) >> 3
+        keys = (q[:, 0] << 10) | (q[:, 1] << 5) | q[:, 2]
+        uniq, inv = np.unique(keys, return_inverse=True)
+        cols_u = [((int(u) >> 10) << 3, ((int(u) >> 5) & 31) << 3, (int(u) & 31) << 3) for u in uniq]
+        core_spr = [self._spark_sprite(1, r_, g_, b_) for r_, g_, b_ in cols_u]
+        inv_l = inv.reshape(-1).tolist()
+        xs_l = xs.tolist()
+        ys_l = ys.tolist()
+        a_core = np.minimum(1.0, a0 / 255.0)
+        a_core_l = a_core.tolist()
+        rc_l = (rad * 1.35).tolist()       # ядро чуть шире точки, край мягкий
+        draw = p.drawPixmap
+        set_op = p.setOpacity
+        R = QRectF
+
         # два прохода: сначала все ореолы (без билинейного сглаживания — они и
         # так сплошной мягкий градиент), затем все ядра (со сглаживанием).
         # Переключать флаг на каждой частице дороже самой отрисовки.
         p.setRenderHint(QPainter.SmoothPixmapTransform, False)
         if glow > 0.02:
-            for i in range(n_p):
-                gw_i = float(gw[i])
-                if gw_i <= 0.02:
-                    continue
-                a_i = float(a0[i])
-                op_h = min(1.0, a_i / 255.0 * (0.45 + 0.55 * min(1.0, gw_i)) * min(1.0, 0.55 + 0.45 * glow))
-                if op_h < 0.035:            # почти невидимый ореол не рисуем
-                    continue
-                rh = float(rad[i]) * (1.0 + 2.6 * glow * gw_i) * 1.5
-                x = float(xs[i])
-                y = float(ys[i])
-                p.setOpacity(op_h)
-                p.drawPixmap(QRectF(x - rh, y - rh, rh * 2.0, rh * 2.0),
-                             self._spark_sprite(0, int(pc[i, 0]), int(pc[i, 1]), int(pc[i, 2])), src)
+            halo_spr = [self._spark_sprite(0, r_, g_, b_) for r_, g_, b_ in cols_u]
+            op_h = a_core * (0.45 + 0.55 * np.minimum(1.0, gw)) * min(1.0, 0.55 + 0.45 * glow)
+            # почти невидимый ореол не рисуем
+            hsel = np.flatnonzero((gw > 0.02) & (op_h >= 0.035))
+            if hsel.size:
+                rh_l = (rad[hsel] * (1.0 + 2.6 * glow * gw[hsel]) * 1.5).tolist()
+                oh_l = op_h[hsel].tolist()
+                for j, i in enumerate(hsel.tolist()):
+                    rh = rh_l[j]
+                    set_op(oh_l[j])
+                    draw(R(xs_l[i] - rh, ys_l[i] - rh, rh * 2.0, rh * 2.0),
+                         halo_spr[inv_l[i]], src)
         p.setRenderHint(QPainter.SmoothPixmapTransform, True)
         for i in range(n_p):
-            a_i = float(a0[i])
-            if a_i < 1.0:
+            ac = a_core_l[i]
+            if ac < 0.004:
                 continue
-            rc = float(rad[i]) * 1.35      # ядро чуть шире точки, край мягкий
-            x = float(xs[i])
-            y = float(ys[i])
-            p.setOpacity(min(1.0, a_i / 255.0))
-            p.drawPixmap(QRectF(x - rc, y - rc, rc * 2.0, rc * 2.0),
-                         self._spark_sprite(1, int(pc[i, 0]), int(pc[i, 1]), int(pc[i, 2])), src)
+            rc = rc_l[i]
+            set_op(ac)
+            draw(R(xs_l[i] - rc, ys_l[i] - rc, rc * 2.0, rc * 2.0), core_spr[inv_l[i]], src)
         p.setOpacity(base_op)
         p.setRenderHint(QPainter.SmoothPixmapTransform, had_sm)
         pen = QPen(QColor(255, 255, 255, 45))
