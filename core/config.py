@@ -60,6 +60,8 @@ DEFAULTS = {
     "spark_glow_start": 0.0,
     "spark_glow_end": 0.55,
     # Цвет от высоты: к вершине искра светлеет (0 — выкл, 1 — у вершины почти белая).
+    # Чувствительность искр: множитель к уровню спектра только для искр.
+    "spark_sensitivity": 1.0,
     "spark_height_tint": 0.3,
     # След у быстрых искр: короткий тающий шлейф позади (0 — выкл).
     "spark_trail": 0.5,
@@ -201,6 +203,7 @@ FLOAT_KEYS = {
     "spark_density": (0.15, 8.0),
     "spark_glow_start": (0.0, 1.0),
     "spark_glow_end": (0.0, 1.0),
+    "spark_sensitivity": (0.25, 4.0),
     "spark_height_tint": (0.0, 1.0),
     "spark_trail": (0.0, 1.0),
     "min_brightness": (0.0, 1.0),
