@@ -134,6 +134,9 @@ DEFAULTS = {
     # программа Skydimo (ScreenMirror), AuraFusion качает только яркость от
     # музыки; "solid" — AuraFusion красит все светодиоды одним цветом.
     "skydimo_mode": "mirror",
+    # Нижний предел яркости ленты Skydimo в режиме mirror: в тишине лента
+    # показывает цвета экрана на этом уровне, а не на «мин. яркости» ПК.
+    "skydimo_min_brightness": 0.35,
     "skydimo_com": "COM4",   # COM-порт ленты Skydimo в запросе set-led
     "rgb_fps": 30,
     "bass_boost": 1.6,
@@ -191,6 +194,7 @@ FLOAT_KEYS = {
     "spark_glow_start": (0.0, 1.0),
     "spark_glow_end": (0.0, 1.0),
     "min_brightness": (0.0, 1.0),
+    "skydimo_min_brightness": (0.0, 0.95),
     "max_brightness": (0.0, 1.0),
     "gamma": (0.1, 10.0),
     "pulse_gain": (0.0, 50.0),

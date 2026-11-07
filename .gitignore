@@ -29,3 +29,7 @@ openrgb_stdout.log
 tools/*.bak-*
 .playwright-mcp/
 OpenRGB/
+
+# побочный проект и мусор рабочей папки
+mw-passthrough/
+one

@@ -1779,6 +1779,7 @@ def main():
     core.refresh_audio_async()
 
     core.overlay.show()
+    core.overlay.exclude_from_capture()
     core.overlay.apply_opacity()
     core.overlay.move_to_monitor(int(core.cfg.get("monitor", 0) or 0))
     QTimer.singleShot(400, lambda: core.overlay.set_click_through(

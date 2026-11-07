@@ -396,6 +396,27 @@ class RGBEngine(threading.Thread):
         self._resend = False        # после «пинка» заново отправить цвет
         self._retry_at = 0.0        # когда повторить подбор недоступных устройств
 
+    @staticmethod
+    def _skydimo_level(prev, cfg):
+        """Яркость ленты Skydimo 0..1 из общей яркости подсветки.
+
+        Общая яркость в тишине стоит у «мин. яркости» (по умолчанию 0.02–0.06):
+        для остальных устройств это едва заметное свечение, а ленте Skydimo,
+        которая показывает цвета экрана, это 6% — со стороны она выглядит
+        выключенной после запуска ПК. Поэтому у ленты свой пол
+        (skydimo_min_brightness): общий диапазон [мин..макс] линейно
+        переносится в [пол..1], и на тишине лента светится вполсилы, а на
+        музыке пульсирует выше этого уровня."""
+        try:
+            floor = max(0.0, min(0.95, float(cfg.get("skydimo_min_brightness", 0.35))))
+            mn = float(cfg.get("min_brightness", 0.02))
+            mx = float(cfg.get("max_brightness", 1.0))
+            span = max(1e-3, mx - mn)
+            k = max(0.0, min(1.0, (float(prev) - mn) / span))
+            return floor + (1.0 - floor) * k
+        except Exception:
+            return max(0.03, float(prev))
+
     def _kick_async(self, host, port, names):
         """«Пинок» режима в отдельном потоке: он занимает секунды и не должен
         тормозить кадры подсветки."""
@@ -614,7 +635,7 @@ class RGBEngine(threading.Thread):
                                 # музыки с полом, чтобы лента не гасла совсем
                                 if self.ext is not None:
                                     try:
-                                        self.ext.push_brightness(max(0.03, prev))
+                                        self.ext.push_brightness(self._skydimo_level(prev, cfg))
                                     except Exception as ee:
                                         self.log("rgb: skydimo-ext fail: %s", ee)
                             elif is_skydimo_target(t):
