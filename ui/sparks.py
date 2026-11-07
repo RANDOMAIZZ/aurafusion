@@ -386,7 +386,11 @@ class SparksMixin:
                 s_k = 0.80 + 0.55 * bass_punch
             elif is_fast:
                 rel_k = float(np.clip(rise[k] / max(r_max, 1e-4), 0.0, 1.0))
-                s_k = amp_n * (0.55 + 0.45 * rel_k) + rel_k * 0.30 * (1.0 + 0.5 * boost)                     + 0.20 * pulse
+                # Скачок и удар УСИЛИВАЮТ уровень самой полосы, а не
+                # добавляются к нему константой: иначе при большом «разгоне»
+                # все быстрые искры упирались в потолок и летели ровной полосой
+                # на одну высоту, и разница между частотами пропадала.
+                s_k = amp_n * (0.55 + 0.45 * rel_k) * (1.0 + 0.12 * boost * rel_k)                     * (1.0 + 0.25 * pulse)
             else:
                 s_k = amp_n * 0.95
             s_k = float(np.clip(s_k, 0.0, 1.3))
@@ -645,6 +649,13 @@ class SparksMixin:
         bst = 0.55 + np.minimum(1.0, lvl) * 0.7
         pc = np.clip(np.stack((st["cr"][:cap][alive], st["cg"][:cap][alive],
                                st["cb"][:cap][alive]), axis=1) * bst[:, None], 0.0, 255.0)
+        # Цвет от высоты: чем выше искра над базовой линией, тем светлее —
+        # фонтан получает градиент от насыщенного низа к светлой верхушке.
+        tint = float(np.clip(S.get("spark_height_tint", 0.3), 0.0, 1.0))
+        if tint > 0.01:
+            hp = np.clip((y_base - st["y"][:cap][alive]) / max(1.0, 0.9 * y_base), 0.0, 1.0)
+            k_t = (tint * 0.85 * hp * hp)[:, None]
+            pc = pc + (255.0 - pc) * k_t
         # сколько ореола по этой высоте: 0 — частица чистая, 1 — полный.
         # Трапеция из двух ограниченных пил: их произведение даёт ровно
         # то же окно с мягкими краями, что и ветки if/elif, но без ветвления
@@ -720,6 +731,30 @@ class SparksMixin:
             rc = rc_l[i]
             set_op(ac)
             draw(R(xs_l[i] - rc, ys_l[i] - rc, rc * 2.0, rc * 2.0), core_spr[inv_l[i]], src)
+        # След у быстрых искр: несколько тающих копий ядра позади, вдоль
+        # скорости. Только у тех, кто летит быстро, — у медленного фона след
+        # был бы просто кашей. Рисуется после ядер, тем же спрайтом.
+        trail = float(np.clip(S.get("spark_trail", 0.5), 0.0, 1.0))
+        if trail > 0.01:
+            vy_a = st["vy"][:cap][alive]
+            # «быстрая» — относительно ползунка скорости: при скорости 0.05
+            # все искры медленные в абсолютных числах, но удары всё равно
+            # заметно быстрее фона
+            spd_t = float(np.clip(S.get("spark_speed", 1.0), 0.05, 4.0))
+            fast = np.flatnonzero((vy_a < -260.0 * max(0.15, spd_t) ** 0.5) & (a_core > 0.05))
+            if fast.size:
+                vy_l = vy_a[fast].tolist()
+                for j, i in enumerate(fast.tolist()):
+                    # длина шлейфа ~ путь за 25-40 мс, растёт с ползунком
+                    step = -vy_l[j] * (0.010 + 0.012 * trail)
+                    rc = rc_l[i]
+                    ac = a_core_l[i]
+                    spr = core_spr[inv_l[i]]
+                    for g in (1, 2, 3):
+                        rg = rc * (1.0 - 0.18 * g)
+                        set_op(ac * trail * (0.55 - 0.15 * g))
+                        yy = ys_l[i] + step * g
+                        draw(R(xs_l[i] - rg, yy - rg, rg * 2.0, rg * 2.0), spr, src)
         p.setOpacity(base_op)
         p.setRenderHint(QPainter.SmoothPixmapTransform, had_sm)
         pen = QPen(QColor(255, 255, 255, 45))

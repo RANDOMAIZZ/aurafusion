@@ -262,7 +262,7 @@ def per_style_keys(style):
         keys |= {"spark_speed", "spark_boost", "spark_density", "spark_glow",
                 "spark_glow_start", "spark_glow_end", "spark_size",
                 "spark_burst_count", "spark_burst_height", "spark_hover",
-                "spark_bass_burst"}
+                "spark_bass_burst", "spark_height_tint", "spark_trail"}
     if style in BASE_STYLES:
         keys |= {"viz_x", "viz_y", "viz_w"}
     if style in CENTER_STYLES:
