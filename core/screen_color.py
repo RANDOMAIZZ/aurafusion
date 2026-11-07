@@ -28,9 +28,24 @@ def _rgb_hue_np(px):
     return h
 
 
+_CW_CACHE = {}
+
+
 def _center_weights(h, w):
     """Вес пикселя по положению: центр важнее краёв (видео в центре,
-    края — таскбар/рамки). 1.0 в центре → ~0.2 в углах, итог 0.35..1.0."""
+    края — таскбар/рамки). 1.0 в центре → ~0.2 в углах, итог 0.35..1.0.
+
+    Размер сэмпла постоянный (96x54), поэтому сетка считается один раз:
+    раньше mgrid и exp пересчитывались на каждом замере."""
+    key = (int(h), int(w))
+    hit = _CW_CACHE.get(key)
+    if hit is not None:
+        return hit
+    _CW_CACHE[key] = _center_weights_calc(h, w)
+    return _CW_CACHE[key]
+
+
+def _center_weights_calc(h, w):
     yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
     gx = (xx / max(1, w - 1) - 0.5) * 2.0
     gy = (yy / max(1, h - 1) - 0.5) * 2.0
@@ -113,21 +128,28 @@ def kmeans_target(arr01, k=3, iters=6, lock=None):
     if centers is None:
         idx = np.linspace(0, n - 1, k).astype(int)  # детерминированные сиды
         centers = pts[idx].astype(np.float64)
+    pts64 = pts.astype(np.float64)
+    w64 = w.astype(np.float64)
+    pw = pts64 * w64[:, None]
+
+    def _assign(cs):
+        # |p - c|^2 = |p|^2 - 2 p.c + |c|^2; |p|^2 для argmin не нужен
+        return np.argmin(-2.0 * (pts64 @ cs.T) + (cs * cs).sum(axis=1)[None, :], axis=1)
+
     for _ in range(max(1, int(iters))):
-        d2 = ((pts[None, :, :] - centers[:, None, :]) ** 2).sum(axis=2)
-        assign = np.argmin(d2, axis=0)
+        assign = _assign(centers)
+        wsum = np.bincount(assign, weights=w64, minlength=k)
         new = centers.copy()
-        for j in range(k):
-            jm = assign == j
-            if jm.sum() and float(w[jm].sum()) > 1e-9:
-                new[j] = (pts[jm] * w[jm][:, None]).sum(axis=0) / w[jm].sum()
+        for c in range(3):
+            num = np.bincount(assign, weights=pw[:, c], minlength=k)
+            ok = wsum > 1e-9
+            new[ok, c] = num[ok] / wsum[ok]
         if np.allclose(new, centers):
             centers = new
             break
         centers = new
-    d2 = ((pts[None, :, :] - centers[:, None, :]) ** 2).sum(axis=2)
-    assign = np.argmin(d2, axis=0)
-    cwsum = np.array([w[assign == j].sum() for j in range(k)])
+    assign = _assign(centers)
+    cwsum = np.bincount(assign, weights=w64, minlength=k)
     win = int(np.argmax(cwsum))
     # угон мелочью запрещён: кластер-победитель должен занимать >=4%
     # площади кадра, иначе это иконка/шум — в нейтральный тон
