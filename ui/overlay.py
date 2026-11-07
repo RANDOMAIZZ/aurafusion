@@ -466,6 +466,7 @@ class Overlay(QWidget):
         self._grab_want = threading.Event()
         self._grab_busy = False
         self._grab_core = None      # ядро, отведённое под съёмку
+        self._dxgi = None           # захват DXGI, создаётся в потоке съёмки
         self._grab_thread = threading.Thread(target=self._grab_loop,
                                              daemon=True, name="aura-grab")
         self._grab_thread.start()
@@ -611,8 +612,10 @@ class Overlay(QWidget):
                     self._stat["busy"] += 1
                     return
                 self._grab_busy = True
+            _g = screen.geometry()
             self._grab_job = {
                 "screen": screen,
+                "geom": (int(_g.x()), int(_g.y()), int(_g.width()), int(_g.height())),
                 "cfg": cfg,
                 "region": (rx, ry, rw, rh),
                 "exclude_viz": bool(cfg.get("exclude_viz", True)),
@@ -713,9 +716,25 @@ class Overlay(QWidget):
             return
         screen = job["screen"]
         rx, ry, rw, rh = job["region"]
-        pix = screen.grabWindow(0).scaled(480, 270, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-        img = pix.toImage().convertToFormat(QImage.Format_RGB888)
-        arr = qimage_to_sample(img, (rx, ry, rw, rh))
+        # Основной путь — DXGI (1-4 мс, безопасно в любом потоке). GDI-захват
+        # через grabWindow остаётся запасным: он в ~10 раз медленнее и из
+        # фонового потока изредка ронял процесс (0x8001010d в crash.log).
+        img = None
+        arr = None
+        if self._dxgi is None:
+            from core.capture import DxgiCapture
+            self._dxgi = DxgiCapture(log=log.info)
+            self._stat["capture"] = "dxgi" if self._dxgi.ok else "gdi"
+        frame = self._dxgi.grab(job["geom"]) if self._dxgi.ok else None
+        if frame is not None:
+            from core.capture import array_to_sample
+            arr = array_to_sample(frame, (rx, ry, rw, rh))
+            self._stat["capture"] = "dxgi"
+        if arr is None:
+            self._stat["capture"] = "gdi"
+            pix = screen.grabWindow(0).scaled(480, 270, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            img = pix.toImage().convertToFormat(QImage.Format_RGB888)
+            arr = qimage_to_sample(img, (rx, ry, rw, rh))
         if arr is None:
             self._stat["None"] += 1
             return
@@ -736,7 +755,8 @@ class Overlay(QWidget):
                 # и цвет навсегда замирает на прошлом. Лучше лишний оверлей в
                 # кадре, чем мёртвый цвет: он занимает часть площади, и при
                 # K-means кластеру нужно больше 4%, чтобы вообще выиграть.
-                raw = qimage_to_sample(img, (rx, ry, rw, rh))
+                raw = (qimage_to_sample(img, (rx, ry, rw, rh)) if img is not None
+                       else array_to_sample(frame, (rx, ry, rw, rh)))
                 if raw is None or float(raw.max()) <= 0.01:
                     self._stat["masked"] += 1
                     return

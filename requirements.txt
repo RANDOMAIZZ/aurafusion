@@ -4,3 +4,4 @@ pyaudiowpatch>=0.2.12
 openrgb-python>=0.3.5
 bleak>=0.22
 Pillow>=10
+dxcam>=0.3
