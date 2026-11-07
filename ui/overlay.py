@@ -7,8 +7,8 @@ import time
 import logging
 
 import numpy as np
-from PySide6.QtCore import QRect, QRectF, Qt, QTimer, Slot
-from PySide6.QtGui import (QBrush, QColor, QImage, QLinearGradient, QPainter,
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Slot
+from PySide6.QtGui import (QBrush, QColor, QImage, QLinearGradient, QPainter, QRadialGradient,
                           QPainterPath, QPen, QPixmap)
 from PySide6.QtWidgets import QApplication, QWidget
 
@@ -1945,163 +1945,261 @@ class Overlay(SparksMixin, QWidget):
                   int(-math.degrees(start) * 16), int(math.degrees(span_ang) * 16))
 
     def draw_spiral(self, p, W, H, n, alpha):
-        """Спираль: спектр намотан по Archimedes. Радиус растёт с углом и
-        дышит по спектру — единственная фигура, у которой длина сама растёт."""
+        """Спираль: спектр намотан по спирали Архимеда и медленно вращается.
+
+        Раньше радиус от спектра менялся на 0.3 размаха, и спираль почти не
+        двигалась. Теперь отклонение втрое сильнее, витки плавные (точки
+        спектра интерполируются), а вся фигура неторопливо поворачивается —
+        так видно, что она живая, даже на ровной музыке."""
         S = self._cfg()
         cx, cy, base, span = self._polar_geometry(W, H, S)
         pulse = self._pulse(S)
-        turns = 2.6
-        steps = max(64, n * 3)
-        lw = max(1.5, min(W, H) * 0.004)
-        pts = []
-        for s in range(steps + 1):
-            t = s / steps
-            ang = -math.pi / 2 + t * turns * 2 * math.pi
-            i = min(n - 1, int(t * n))
-            v = (float(self.lines[i]) if i < len(self.lines) else 0.0) * pulse
-            r = base * 0.22 + t * base * 1.05 + v * span * 0.30
-            pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang), i, v))
+        turns = 2.4
+        steps = max(180, n * 4)
+        lw = max(2.0, min(W, H) * 0.0045)
+        d = np.asarray(self.lines, dtype=np.float32)[:n]
+        if not len(d):
+            return
+        d = np.clip(self.spatial_smooth(d, 0.25), 0.0, 1.4) * pulse
+        t = np.linspace(0.0, 1.0, steps + 1)
+        v = np.interp(t, np.linspace(0.0, 1.0, len(d)), d)
+        rot = (time.time() * 0.25) % (2 * math.pi)
+        ang = -math.pi / 2 + t * turns * 2 * math.pi + rot
+        r = base * 0.18 + t * base * 1.0 + v * span * (0.55 + 0.45 * t)
+        xs = (cx + r * np.cos(ang)).tolist()
+        ys = (cy + r * np.sin(ang)).tolist()
+        idx = np.minimum(n - 1, (t * n).astype(int)).tolist()
+        vl = v.tolist()
         p.setBrush(Qt.NoBrush)
+        pen = QPen()
+        pen.setCapStyle(Qt.RoundCap)
         for s in range(steps):
-            x1, y1, i1, v1 = pts[s]
-            x2, y2 = pts[s + 1][0], pts[s + 1][1]
-            pen = QPen(self._bar_color(i1, v1, alpha))
-            pen.setWidth(lw)
-            pen.setCapStyle(Qt.RoundCap)
+            # толщина растёт с громкостью: громкий участок витка «набухает»
+            pen.setColor(self._bar_color(idx[s], vl[s], alpha))
+            pen.setWidthF(lw * (0.8 + 0.9 * min(1.0, vl[s])))
             p.setPen(pen)
-            p.drawLine(int(x1), int(y1), int(x2), int(y2))
+            p.drawLine(QPointF(xs[s], ys[s]), QPointF(xs[s + 1], ys[s + 1]))
 
     def draw_mesh(self, p, W, H, n, alpha):
-        """Сетка: столбцы — частоты, строки — уровень. Каждая частота
-        заполняет снизу столько ячеек, сколько набрала громкости."""
+        """Сетка: столбцы — частоты, строки — уровень.
+
+        Раньше тихая частота не получала ни одной ячейки, и правая часть
+        экрана (верхние частоты) оставалась пустой — сетка выглядела обрезанной.
+        Теперь вся сетка всегда видна блёкло, горящие ячейки светятся поверх,
+        верхняя ячейка столбца загорается частично (по дробной части уровня),
+        а над столбцом держится «пик», который медленно опускается."""
         S = self._cfg()
         x0, y_base, w = self.zone(W, H)
-        rows = 7
+        rows = 9
         d = np.asarray(self.lines, dtype=np.float32)[:n]
         if len(d) < n:
             d = np.pad(d, (0, n - len(d)), mode="edge" if len(d) else "constant")
-        d = np.clip(d, 0.0, 1.4)
-        gap = 3
+        d = np.clip(d * self._pulse(S), 0.0, 1.0)
+        gap = 2
         cw = max(1.5, (w - gap * (n + 1)) / n)
         hs = float(S.get("height_scale", 0.55))
         row_h = H * self.FIG_BARS * hs * 2.0 / rows
+        ch = row_h * 0.78
+        # пик над столбцом: держится и медленно опускается
+        pk = getattr(self, "_mesh_peak", None)
+        if pk is None or len(pk) != n:
+            pk = np.zeros(n, np.float32)
+        pk = np.maximum(d, pk - 0.012)
+        self._mesh_peak = pk
         p.setPen(Qt.NoPen)
+        dim = QColor(255, 255, 255, max(0, int(alpha * 0.06)))
+        lv = (d * rows).tolist()
+        pkl = pk.tolist()
         for i in range(n):
             x = x0 + gap + i * (cw + gap)
-            cells = int(min(rows, round(float(d[i]) * rows)))
-            for rw in range(cells):
-                # чем выше ячейка, тем ярче — объём читается без обводки
+            # блёклая подложка: вся сетка видна всегда
+            p.setBrush(dim)
+            for rw in range(rows):
+                p.drawRect(QRectF(x, y_base - (rw + 1) * row_h, cw, ch))
+            full = int(lv[i])
+            frac = lv[i] - full
+            for rw in range(min(rows, full + 1)):
                 f = (rw + 1) / rows
-                a = int(alpha * (0.32 + 0.68 * f))
-                p.setBrush(QBrush(self._bar_color(i, f, max(0, min(255, a)))))
-                p.drawRect(QRectF(x, y_base - (rw + 1) * row_h, cw, row_h * 0.8))
+                k = 1.0 if rw < full else frac
+                if k <= 0.02:
+                    continue
+                a = int(alpha * (0.35 + 0.65 * f) * k)
+                p.setBrush(self._bar_color(i, f, max(0, min(255, a))))
+                p.drawRect(QRectF(x, y_base - (rw + 1) * row_h, cw, ch))
+            prow = int(min(rows - 1, pkl[i] * rows))
+            if pkl[i] > 0.04:
+                c = self._bar_color(i, 1.0, max(0, min(255, int(alpha * 0.9))))
+                p.setBrush(c)
+                p.drawRect(QRectF(x, y_base - (prow + 1) * row_h, cw, ch * 0.35))
 
     def draw_stack(self, p, W, H, n, alpha):
-        """Слои: спектр, нарезанный на полосы по частотам, каждая полоса —
-        свой участок и свой оттенок. В отличие от «слоёв по высоте» не
-        зависит от того, где на спектре сейчас энергия."""
+        """Слои: спектр, нарезанный на полосы по частотам, — как горные хребты.
+
+        Раньше каждая полоса нормировалась по своему пику в КАЖДОМ кадре и
+        сильно сглаживалась: все четыре слоя были почти ровными линейками
+        одной высоты, громкость не читалась вовсе. Теперь у каждого слоя своя
+        медленная «автогромкость» (пик с памятью), слои выше и заходят друг на
+        друга, рисуются от дальнего к ближнему с плотной заливкой."""
         S = self._cfg()
         x0, y_base, w = self.zone(W, H)
         bands = 4
-        M = max(16, min(360, int(w // 2)))
+        M = max(32, min(360, int(w // 3)))
         hs = float(S.get("height_scale", 0.55))
-        total = H * self.FIG_BARS * hs * 1.35
+        total = H * self.FIG_BARS * hs * 1.6
         band_h = total / bands
         d = np.asarray(self.lines, dtype=np.float32)[:n]
         if len(d) < n:
             d = np.pad(d, (0, n - len(d)), mode="edge" if len(d) else "constant")
+        d = d * self._pulse(S)
+        agc = getattr(self, "_stack_agc", None)
+        if agc is None or len(agc) != bands:
+            agc = np.zeros(bands, np.float32)   # первый кадр возьмёт пик сам
+        xq = np.linspace(0, 1, M)
+        xs = (x0 + xq * w).tolist()
         p.setBrush(Qt.NoBrush)
         for bi in range(bands):
             lo, hi = bi * n // bands, max(bi * n // bands + 1, (bi + 1) * n // bands)
-            seg = np.clip(self.spatial_smooth(d[lo:hi], 0.35), 0.0, 1.5)
+            seg = np.clip(self.spatial_smooth(d[lo:hi], 0.15), 0.0, 1.5)
             if not len(seg):
                 continue
-            # каждая полоса нормируется по своему пику, иначе верхние
-            # полосы (тихие верха) прижимались к базовой линии и читались
-            # как ровные линейки, а слои переставали различаться
-            seg = seg / max(0.08, float(np.max(seg)))
-            xq = np.linspace(0, 1, M)
-            yq = np.interp(xq, np.linspace(0, 1, len(seg)), seg).astype(np.float32)
-            xs = x0 + xq * w
-            base_y = y_base - (bands - 1 - bi) * band_h
-            ys = base_y - yq * band_h * 0.92
+            # автогромкость с памятью: пик слоя растёт сразу, а спадает
+            # медленно — тихий участок трека виден как тихий
+            agc[bi] = max(float(np.max(seg)), float(agc[bi]) * 0.995, 0.05)
+            # рельеф: общий «пол» слоя частично вычитаем, иначе ровный по
+            # частотам участок поднимался плоским столом без формы
+            floor = 0.7 * float(np.min(seg))
+            seg = 0.25 * (seg / agc[bi]) + 0.75 * (seg - floor) / max(0.05, agc[bi] - floor)
+            yq = np.interp(xq, np.linspace(0, 1, len(seg)), seg)
+            base_y = y_base - (bands - 1 - bi) * band_h * 0.62
+            ys = (base_y - yq * band_h * 1.25).tolist()
             path = QPainterPath()
             path.moveTo(xs[0], base_y)
+            path.lineTo(xs[0], ys[0])
             for k in range(1, M - 1):
                 path.quadTo(xs[k], ys[k], (xs[k] + xs[k + 1]) / 2, (ys[k] + ys[k + 1]) / 2)
+            path.lineTo(xs[-1], ys[-1])
             path.lineTo(xs[-1], base_y)
             path.closeSubpath()
             c = self._shape_rgb(min(n - 1, lo + (hi - lo) // 2))
-            p.fillPath(path, QBrush(QColor(min(255, int(c[0])), min(255, int(c[1])),
-                                           min(255, int(c[2])), int(alpha * 0.30))))
-            pen = QPen(QColor(min(255, int(c[0] + 60)), min(255, int(c[1] + 60)),
-                              min(255, int(c[2] + 60)), min(255, alpha)))
-            pen.setWidth(2)
+            # дальний слой темнее, ближний ярче — читается глубина
+            depth = 0.55 + 0.45 * (bi / max(1, bands - 1))
+            top = min(base_y - band_h * 1.25, min(ys))
+            grad = QLinearGradient(0, top, 0, base_y)
+            grad.setColorAt(0.0, QColor(min(255, int(c[0])), min(255, int(c[1])),
+                                        min(255, int(c[2])), int(alpha * 0.55 * depth)))
+            grad.setColorAt(1.0, QColor(min(255, int(c[0])), min(255, int(c[1])),
+                                        min(255, int(c[2])), int(alpha * 0.12 * depth)))
+            p.fillPath(path, QBrush(grad))
+            pen = QPen(QColor(min(255, int(c[0] + 70)), min(255, int(c[1] + 70)),
+                              min(255, int(c[2] + 70)), min(255, int(alpha * depth))))
+            pen.setWidthF(2.0)
             p.setPen(pen)
-            for k in range(M - 1):
-                p.drawLine(int(xs[k]), int(ys[k]), int(xs[k + 1]), int(ys[k + 1]))
+            p.strokePath(path, pen)
+        self._stack_agc = agc
 
     def draw_orbs(self, p, W, H, n, alpha):
-        """Шарики: круги с радиусом по спектру, полупрозрачные — в местах
-        перекрытия цвет набирает плотность."""
+        """Шарики: светящиеся сферы, которые парят на высоте своей частоты.
+
+        Раньше радиус был ограничен шагом одной полосы (6 px при 64 полосах),
+        а шарики стояли на базовой линии — получалась едва заметная цепочка
+        у самого низа. Теперь шарик поднимается на высоту громкости своей
+        частоты с инерцией (догоняет и чуть перелетает), растёт с громкостью
+        и мягко светится градиентом."""
         S = self._cfg()
         x0, y_base, w = self.zone(W, H)
-        gap = 2
-        cw = max(3.0, (w - gap * (n + 1)) / n)
-        pulse = self._pulse(S)
+        m = max(8, min(48, n // 2))       # шариков меньше, чем полос, — им нужно место
+        d = np.asarray(self.lines, dtype=np.float32)[:n]
+        if not len(d):
+            return
+        # каждый шарик — среднее своей группы полос
+        edges = np.linspace(0, len(d), m + 1).astype(int)
+        target = np.array([float(np.max(d[edges[k]:max(edges[k] + 1, edges[k + 1])]))
+                           for k in range(m)], np.float32)
+        target = np.clip(target * self._pulse(S), 0.0, 1.3)
+        pos = getattr(self, "_orb_pos", None)
+        vel = getattr(self, "_orb_vel", None)
+        if pos is None or len(pos) != m:
+            pos = target.copy()
+            vel = np.zeros(m, np.float32)
+        vel = (vel * 0.78 + (target - pos) * 0.22).astype(np.float32)
+        pos = np.clip(pos + vel, 0.0, 1.4).astype(np.float32)
+        self._orb_pos, self._orb_vel = pos, vel
+        step = w / m
+        hs = float(S.get("height_scale", 0.55))
+        max_h = H * self.FIG_BARS * hs * 2.0
         p.setPen(Qt.NoPen)
-        for i in range(n):
-            v = (float(self.lines[i]) if i < len(self.lines) else 0.0) * pulse
-            vc = min(1.2, max(0.0, v))
-            # радиус держим в пределах шага: иначе на басах шарики слипались
-            # в одно пятно и фигура превращалась в кляксу
-            rad = cw * (0.5 + 1.4 * min(1.0, vc))
-            x = x0 + gap + i * (cw + gap) + cw / 2
-            y = y_base - rad
-            p.setBrush(QBrush(self._bar_color(i, v, int(alpha * 0.40))))
-            p.drawEllipse(QRectF(x - rad, y - rad, rad * 2, rad * 2))
-        pen = QPen(QColor(255, 255, 255, 45))
+        for k in range(m):
+            v = float(pos[k])
+            i = min(n - 1, int((k + 0.5) / m * n))
+            rad = step * (0.18 + 0.32 * min(1.0, v))
+            x = x0 + step * (k + 0.5)
+            y = y_base - rad - v * (max_h - rad * 2)
+            c = self._bar_color(i, v, 255)
+            g = QRadialGradient(x, y, rad * 2.2)
+            core = QColor(c)
+            core.setAlpha(int(alpha * 0.95))
+            mid = QColor(c)
+            mid.setAlpha(int(alpha * 0.45))
+            edge = QColor(c)
+            edge.setAlpha(0)
+            g.setColorAt(0.0, QColor(255, 255, 255, int(alpha * 0.85)))
+            g.setColorAt(0.18, core)
+            g.setColorAt(0.42, mid)
+            g.setColorAt(1.0, edge)
+            p.setBrush(QBrush(g))
+            p.drawEllipse(QRectF(x - rad * 2.2, y - rad * 2.2, rad * 4.4, rad * 4.4))
+        pen = QPen(QColor(255, 255, 255, 40))
         pen.setWidth(1)
         p.setPen(pen)
         p.drawLine(int(x0), int(y_base), int(x0 + w), int(y_base))
 
     def draw_radial(self, p, W, H, n, alpha):
-        """Кольца: вложенные полярные кривые, у каждой свой кусок спектра.
+        """Кольца: вложенные плавные кривые, у каждой свой кусок спектра.
 
-        Радиус идёт по спектру вдоль угла, поэтому круг распускается на
-        ударах. Сделано замкнутой кривой, а не спицами — иначе «кольца» были
-        неотличимы от «лучей», а это две разные вариации."""
+        Раньше кольцо строилось по 24 точкам прямыми отрезками, и вместо
+        колец были угловатые многоугольники. Теперь точек много, спектр
+        интерполируется и зеркалится по кругу (начало и конец кольца
+        совпадают, шва нет), кривая рисуется сглаженным контуром."""
         S = self._cfg()
         cx, cy, base, span = self._polar_geometry(W, H, S)
         pulse = self._pulse(S)
         short = float(min(W, H))
         rings = 4
-        per = max(24, n // rings)
+        per = 160
         amp = span * 0.9
-        lw = max(2.0, short * 0.005)
+        lw = max(2.0, short * 0.0045)
+        d = np.asarray(self.lines, dtype=np.float32)[:n]
+        if not len(d):
+            return
         p.setBrush(Qt.NoBrush)
+        ang = np.linspace(0.0, 2 * math.pi, per, endpoint=False) - math.pi / 2
+        # 0..1..0 по кругу: спектр зеркалится, кольцо замкнуто без шва
+        mirror = 1.0 - np.abs(np.linspace(-1.0, 1.0, per, endpoint=False))
         for ri in range(rings):
+            lo, hi = ri * len(d) // rings, max(ri * len(d) // rings + 2, (ri + 1) * len(d) // rings)
+            seg = np.clip(self.spatial_smooth(d[lo:hi], 0.3) * pulse, 0.0, 1.4)
+            v = np.interp(mirror, np.linspace(0.0, 1.0, len(seg)), seg)
             r0 = base * (0.30 + 0.32 * ri)
-            # опорная окружность — видно, где кольцо покоится
-            guide = QPen(QColor(255, 255, 255, 38))
-            guide.setWidth(1)
-            p.setPen(guide)
-            p.drawEllipse(QRectF(cx - r0, cy - r0, r0 * 2, r0 * 2))
-            pts = []
+            rr = r0 + 3 + v * amp * (0.30 + 0.18 * ri)
+            xs = (cx + rr * np.cos(ang)).tolist()
+            ys = (cy + rr * np.sin(ang)).tolist()
+            path = QPainterPath()
+            mx, my = (xs[-1] + xs[0]) / 2, (ys[-1] + ys[0]) / 2
+            path.moveTo(mx, my)
             for k in range(per):
-                i = int(k / per * n)
-                v = min(1.4, (float(self.lines[i]) if i < len(self.lines) else 0.0) * pulse)
-                ang = 2 * math.pi * k / per - math.pi / 2
-                rr = r0 + 4 + v * amp * (0.28 + 0.20 * ri)
-                pts.append((cx + rr * math.cos(ang), cy + rr * math.sin(ang), i, v))
-            for k in range(per):
-                x1, y1, i1, v1 = pts[k]
-                x2, y2 = pts[(k + 1) % per][0], pts[(k + 1) % per][1]
-                pen = QPen(self._bar_color(i1, v1, alpha))
-                pen.setWidth(lw)
-                pen.setCapStyle(Qt.RoundCap)
-                p.setPen(pen)
-                p.drawLine(int(x1), int(y1), int(x2), int(y2))
+                k2 = (k + 1) % per
+                path.quadTo(xs[k], ys[k], (xs[k] + xs[k2]) / 2, (ys[k] + ys[k2]) / 2)
+            path.closeSubpath()
+            mid_i = min(n - 1, lo + (hi - lo) // 2)
+            lvl = float(np.max(v))
+            c = self._bar_color(mid_i, lvl, alpha)
+            fill = QColor(c)
+            fill.setAlpha(int(alpha * 0.07))
+            p.fillPath(path, QBrush(fill))
+            pen = QPen(c)
+            pen.setWidthF(lw * (0.9 + 0.4 * min(1.0, lvl)))
+            pen.setJoinStyle(Qt.RoundJoin)
+            p.strokePath(path, pen)
 
     def draw_rays(self, p, W, H, n, alpha):
         """Лучи: спицы из центра экрана, длина — по спектру."""
