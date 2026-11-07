@@ -335,6 +335,14 @@ start_aurafusion.bat stop            остановить
 Проверено на Windows 11, Python 3.14, материнка B760 GAMING X DDR4 GEN5, GALAX GeForce RTX 5070 Ti,
 BLE-лента ELK-BLEDDM, лента Skydimo SK0L27.
 
+Автотесты ядра (конфиг, детектор темпа, цвет, захват, журнал, режимы OpenRGB) —
+они же гоняются на GitHub при каждом push:
+
+```bat
+pip install pytest
+python -m pytest -q
+```
+
 Оверлей можно проверить без экрана: рендер идёт через offscreen-платформу Qt, звук заменён синтетикой.
 
 ```bat
