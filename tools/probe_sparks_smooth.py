@@ -56,6 +56,7 @@ def run(style_over, seconds=12.0, label=""):
     counts, pops = [], 0
     prev_vis = None
     prev_life = None
+    prev_kind = None
     n = int(seconds * 60)
     for _ in range(n):
         ov.tick()
