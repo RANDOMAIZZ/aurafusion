@@ -104,6 +104,9 @@ DEFAULTS = {
     "color_region": "full",     # full | center | top | bottom | custom
     "color_rx": 0.0, "color_ry": 0.0, "color_rw": 1.0, "color_rh": 1.0,  # своя область (доли экрана)
     "click_through": True, "always_on_top": True,
+    # Виден ли оверлей в демонстрации экрана (Discord, OBS). По умолчанию нет:
+    # окно скрыто от захвата, чтобы замер цвета не видел сам оверлей.
+    "overlay_in_capture": False,
     # Оверлей не залезает на панель задач. Иначе на автоскрытии она выезжает
     # под оверлей и кажется, что не поднялась.
     "avoid_taskbar": True,

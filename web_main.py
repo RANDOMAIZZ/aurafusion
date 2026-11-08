@@ -261,6 +261,9 @@ class Core:
             if "click_through" in keys:
                 on = bool(cfg.get("click_through", True))
                 gui.post(lambda: self.overlay.set_click_through(on))
+            if "overlay_in_capture" in keys:
+                # переключить скрытие от захвата: окно видно в Discord/OBS или нет
+                gui.post(self.overlay.exclude_from_capture)
             if "avoid_taskbar" in keys:
                 # геометрия окна считается при создании, поэтому снять или
                 # вернуть галку без перезапуска можно только переставив окно

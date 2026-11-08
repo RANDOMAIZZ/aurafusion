@@ -263,7 +263,7 @@ def per_style_keys(style):
                 "spark_glow_start", "spark_glow_end", "spark_size",
                 "spark_burst_count", "spark_burst_height", "spark_hover",
                 "spark_bass_burst", "spark_height_tint", "spark_trail",
-                "spark_sensitivity", "spark_fw_size", "spark_chaos"}
+                "spark_sensitivity", "spark_chaos"}
     if style in BASE_STYLES:
         keys |= {"viz_x", "viz_y", "viz_w"}
     if style in CENTER_STYLES:
@@ -551,22 +551,29 @@ class Overlay(SparksMixin, QWidget):
             pass
 
     def exclude_from_capture(self):
-        """Скрыть окно оверлея от захвата экрана (WDA_EXCLUDEFROMCAPTURE).
+        """Скрыть окно оверлея от захвата экрана (WDA_EXCLUDEFROMCAPTURE) —
+        или, если включена настройка «оверлей виден в демонстрации экрана»,
+        наоборот показать его в захвате (Discord, OBS, Skype).
 
-        Раньше замер цвета видел и сам оверлей: искры, окрашенные цветом
-        экрана, попадали в кадр замера и влияли на следующий цвет — частицы
-        реагировали сами на себя. Вырезание через маску не спасало: при
-        высоких искрах она закрывала почти весь кадр. С этим флагом окно
-        на мониторе видно как обычно, а в захвате (и в нашем, и в захвате
-        Skydimo) его нет. Нужна Windows 10 2004+, иначе вернётся False и
-        работает старая маска."""
+        Скрытие нужно, чтобы замер цвета не видел сам оверлей: искры,
+        окрашенные цветом экрана, попадали в кадр и влияли на следующий цвет.
+        Но тот же флаг прячет оверлей и от демонстрации экрана в Discord:
+        зрители его не видят. С включённой настройкой флаг снимается, а
+        оверлей из замера цвета вырезается маской (exclude_viz), как раньше.
+        Скрытие работает на Windows 10 2004+, иначе вернётся False.
+        Метод зовётся при старте и при смене настройки (из главного потока)."""
+        want_visible = bool(self._cfg().get("overlay_in_capture", False))
         try:
             hwnd = int(self.winId())
-            ok = bool(ctypes.windll.user32.SetWindowDisplayAffinity(hwnd, 0x11))
+            ok = bool(ctypes.windll.user32.SetWindowDisplayAffinity(
+                hwnd, 0x00 if want_visible else 0x11))
         except Exception:
             ok = False
-        self._capture_excluded = ok
-        log.info("оверлей скрыт от захвата экрана: %s", ok)
+        # маска нужна, пока оверлей виден в захвате (или флаг не удалось поставить)
+        self._capture_excluded = bool(ok and not want_visible)
+        log.info("оверлей в захвате экрана: %s",
+                 "виден (демонстрация, замер цвета режет маской)" if want_visible
+                 else ("скрыт" if ok else "скрыть не удалось, режет маска"))
         return ok
 
     def set_click_through(self, on: bool):
