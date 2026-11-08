@@ -1156,6 +1156,13 @@ class Overlay(SparksMixin, QWidget):
         # на басу ловится только по этому значению.
         self._bass_raw = float(bass_raw)
         demo = bool(S.get("demo"))
+        # Спектр прямо из движка, до авто-баланса и сглаживания, — для искр.
+        # Авто-баланс тянет тихий кусок трека до полной высоты, а сглаживание
+        # размазывает удар на несколько кадров; искрам нужно ни то, ни другое.
+        # Номер кадра звука отличает свежий спектр от уже прочитанного.
+        self._spec_raw = np.asarray(spec, dtype=np.float32).copy()
+        self._has_sig = bool(has_sig or demo)
+        self._audio_seq = getattr(self.audio, "frame_seq", None)
         if len(spec) != len(self.disp):
             self.disp = np.zeros(len(spec), dtype=np.float32)
         if S.get("auto_balance", True) and (has_sig or demo) and len(spec) >= 6:

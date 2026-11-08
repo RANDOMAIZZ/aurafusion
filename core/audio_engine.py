@@ -52,6 +52,13 @@ class SharedAudio(threading.Thread):
         self._bin_idx = self._make_bins(n_bars)
         self._win_cache = {}
         self._t = 0.0
+        # Скользящее окно: последние chunk сэмплов. Спектр считается по
+        # нему на каждом шаге hop = chunk/4, а не раз в целый chunk.
+        self._ring = np.zeros(0, dtype=np.float32)
+        # Номер свежего кадра звука. Оверлей тикает чаще, чем приходит звук,
+        # и по номеру отличает новый спектр от того же самого, прочитанного
+        # второй раз: иначе один удар считался бы дважды или терялся.
+        self.frame_seq = 0
         self.running = True
 
     # ---------- сетка бинов ----------
@@ -107,8 +114,13 @@ class SharedAudio(threading.Thread):
         return math.sqrt(2.0 * float(np.sum(np.abs(spec[band]) ** 2))) / (chunk * chunk)
 
     # ---------- demo-синт ----------
-    def demo_block(self):
-        n = self.block
+    @staticmethod
+    def hop_of(chunk):
+        """Шаг скользящего окна: четверть блока, не меньше 256 сэмплов."""
+        return max(256, int(chunk) // 4)
+
+    def demo_block(self, n=None):
+        n = int(n or self.block)
         self._t += n / self.samplerate
         t = self._t + np.arange(n) / self.samplerate
         beat = 0.6 + 0.4 * np.sin(2 * np.pi * 2 * self._t)
@@ -120,6 +132,76 @@ class SharedAudio(threading.Thread):
         gate = np.maximum(0.0, np.sin(2 * np.pi * 4 * t + self._t)) ** 8
         hats = 0.12 * np.sin(2 * np.pi * 7000 * t) * gate
         return ((bass + low2 + mid + lead + shimmer + hats) * 0.35).astype(np.float32)
+
+    # ---------- обработка ----------
+    def feed(self, x, sr, cfg=None):
+        """Принять новый кусок звука (моно, float32) и пересчитать всё.
+
+        Раньше блок в chunk сэмплов читался целиком и только потом шёл в
+        FFT: при 2048 и 48 кГц спектр обновлялся раз в 43 мс, а оверлей на
+        60 fps два кадра из трёх рисовал старый звук. Удар попадал в искры
+        с опозданием до 43 мс плюс время самого блока, и на 16-х хэтах два
+        удара могли слиться в один блок.
+
+        Теперь читаем шагом hop = chunk/4 (~11 мс) и считаем FFT по
+        скользящему окну из последних chunk сэмплов. Разрешение по частоте
+        прежнее (окно той же длины), шкала спектра и уровней та же, а
+        свежий спектр приходит вчетверо чаще.
+        """
+        cfg2 = cfg if cfg is not None else self._cfg()
+        chunk = max(256, int(cfg2.get("chunk") or 2048))
+        x = np.asarray(x, dtype=np.float32).reshape(-1)
+        if x.size == 0:
+            return
+        ring = np.concatenate([self._ring, x])
+        if len(ring) > chunk:
+            ring = ring[-chunk:]
+        self._ring = ring
+        if len(ring) < chunk:
+            # окно ещё не набрано (первые миллисекунды): дополняем нулями
+            win = np.concatenate([np.zeros(chunk - len(ring), np.float32), ring])
+        else:
+            win = ring
+        rms = float(np.sqrt(np.mean(win * win)))
+        try:
+            bass = self._bass_level(win, chunk, sr)
+        except Exception:
+            bass = rms
+        boost = float(cfg2.get("bass_boost", 1.6))
+        lvl = max(rms, bass * boost)
+        with self.lock:
+            if self.block != chunk or self.samplerate != sr:
+                self.block = chunk
+                self.samplerate = sr
+                self._bin_idx = self._make_bins(self.n_bars)
+        spec = self.spectrum_from_fft(
+            win, cfg2.get("sensitivity", 1.4),
+            cfg2.get("bass_gain", 1.0), cfg2.get("mid_gain", 1.25),
+            cfg2.get("treble_gain", 1.7))
+        # Тишина определялась по мгновенному среднему одного блока:
+        # на любой паузе между нотами или в начале трека has_signal
+        # на кадр обнулялся, и при auto_hide волна гасла и вспыхала
+        # снова. Теперь порог двусторонний — уже набранный сигнал
+        # держится, пока реально не стихнет.
+        thr = float(cfg2.get("silence_thr", 0.002))
+        lvl_abs = float(np.abs(win).mean())
+        with self.lock:
+            was = self.has_signal
+            if was:
+                self.has_signal = lvl_abs > thr * 0.5   # отпускаем позже
+            else:
+                self.has_signal = lvl_abs > thr * 1.5   # берём позже
+            if self.has_signal:
+                n = min(len(spec), len(self.spec))
+                self.spec[:n] = spec[:n]
+            else:
+                # в тишине спектр плавно гаснет, а не обрывается
+                self.spec *= 0.9
+            self.wave = (win[::2][:1024].copy() if len(win) >= 64
+                         else np.zeros(1024, dtype=np.float32))
+            self.level = lvl
+            self.bass = bass * boost
+            self.frame_seq += 1
 
     # ---------- устройства ----------
     @staticmethod
@@ -160,20 +242,13 @@ class SharedAudio(threading.Thread):
                 chunk = max(256, int(cfg.get("chunk") or 2048))
                 demo = bool(cfg.get("demo"))
                 if demo:
-                    mono = self.demo_block()
-                    time.sleep(self.block / self.samplerate * 0.9)
-                    spec = self.spectrum_from_fft(
-                        mono, cfg.get("sensitivity", 1.4),
-                        cfg.get("bass_gain", 1.0), cfg.get("mid_gain", 1.25),
-                        cfg.get("treble_gain", 1.7))
-                    lvl = float(np.clip(np.abs(mono).mean() * 8, 0, 1))
+                    hop = self.hop_of(chunk)
+                    mono = self.demo_block(hop)
+                    time.sleep(hop / self.samplerate * 0.9)
+                    self.feed(mono, self.samplerate, cfg)
                     with self.lock:
-                        if self.block != chunk:
-                            self.block = chunk
-                            self._bin_idx = self._make_bins(self.n_bars)
-                        n = min(len(spec), len(self.spec))
-                        self.spec[:n] = spec[:n]
-                        self.wave = mono[::2][:1024].copy()
+                        # у демо свой уровень: синт ровный, RMS дал бы ноль
+                        lvl = float(np.clip(np.abs(mono).mean() * 8, 0, 1))
                         self.level = lvl
                         self.bass = lvl
                         self.has_signal = True
@@ -237,12 +312,15 @@ class SharedAudio(threading.Thread):
                         nch = dev["maxInputChannels"] or 2
                         with _PA_LOCK:
                             stream = p.open(format=pyaudio.paFloat32, channels=nch, rate=sr,
-                                            frames_per_buffer=chunk, input=True,
+                                            frames_per_buffer=self.hop_of(chunk), input=True,
                                             input_device_index=dev["index"])
                         ctx = {"want": want, "name": dev["name"], "nch": nch,
-                               "chunk": chunk, "sr": sr}
-                        self.block = chunk
-                        self._bin_idx = self._make_bins(self.n_bars)
+                               "chunk": chunk, "sr": sr, "hop": self.hop_of(chunk)}
+                        with self.lock:
+                            self.block = chunk
+                            self.samplerate = sr
+                            self._bin_idx = self._make_bins(self.n_bars)
+                        self._ring = np.zeros(0, dtype=np.float32)
                         self.status = f"loopback: {dev['name']}"
                         self.active = dev["name"]
                         import logging as _lg2
@@ -257,7 +335,7 @@ class SharedAudio(threading.Thread):
                         continue
 
                 try:
-                    raw = stream.read(ctx["chunk"], exception_on_overflow=False)
+                    raw = stream.read(ctx["hop"], exception_on_overflow=False)
                 except Exception as e:
                     self.status = f"переподключение ({e})"
                     try:
@@ -274,41 +352,7 @@ class SharedAudio(threading.Thread):
                 nch = ctx["nch"]
                 if nch > 1 and x.size % nch == 0:
                     x = x.reshape(-1, nch).mean(axis=1)
-                cfg2 = self._cfg()
-                rms = float(np.sqrt(np.mean(x * x)))
-                try:
-                    bass = self._bass_level(x, ctx["chunk"], ctx["sr"])
-                except Exception:
-                    bass = rms
-                boost = float(cfg2.get("bass_boost", 1.6))
-                lvl = max(rms, bass * boost)
-                spec = self.spectrum_from_fft(
-                    x, cfg2.get("sensitivity", 1.4),
-                    cfg2.get("bass_gain", 1.0), cfg2.get("mid_gain", 1.25),
-                    cfg2.get("treble_gain", 1.7))
-                # Тишина определялась по мгновенному среднему одного блока:
-                # на любой паузе между нотами или в начале трека has_signal
-                # на кадр обнулялся, и при auto_hide волна гасла и вспыхала
-                # снова. Теперь порог двусторонний — уже набранный сигнал
-                # держится, пока реально не стихнет.
-                thr = float(cfg2.get("silence_thr", 0.002))
-                lvl_abs = float(np.abs(x).mean())
-                with self.lock:
-                    was = self.has_signal
-                    if was:
-                        self.has_signal = lvl_abs > thr * 0.5   # отпускаем позже
-                    else:
-                        self.has_signal = lvl_abs > thr * 1.5   # берём позже
-                    if self.has_signal:
-                        n = min(len(spec), len(self.spec))
-                        self.spec[:n] = spec[:n]
-                    else:
-                        # в тишине спектр плавно гаснет, а не обрывается
-                        self.spec *= 0.9
-                    self.wave = (x[::2][:1024].copy() if len(x) >= 64
-                                 else np.zeros(1024, dtype=np.float32))
-                    self.level = lvl
-                    self.bass = bass * boost
+                self.feed(x, ctx["sr"])
         finally:
             try:
                 if stream is not None:

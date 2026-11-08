@@ -1,10 +1,11 @@
 """Плавность искр: не пропадают ли они рывками.
 
-Считаем число живых частиц в каждом кадре и смотрим на самый резкий обрыв
-за секунду. Если часть фонтана исчезает одним кадром — это тот самый «затык»,
-когда наверху висят точки и разом их нет.
+Считаем не число живых частиц, а свет: сколько искр пропало (умерло или
+было заменено новой) в кадре, где они ещё были видны. Искра, догоревшая
+до нуля, исчезает незаметно, сколько бы их ни умерло разом; а вот искра,
+выключенная на половине яркости, — это и есть «рывок».
 
-Порог нормы: за кадр не может пропасть больше 12% живых частиц.
+Порог нормы: ни одной искры ярче 10% не пропадает одним кадром.
 """
 import os
 import sys
@@ -52,30 +53,31 @@ def run(style_over, seconds=12.0, label=""):
     ov.resize(1280, 720)
     ov._hide_k = 1.0
     ov._last_eff_op = -1.0
-    counts, alphas = [], []
+    counts, pops = [], 0
+    prev_vis = None
+    prev_life = None
     n = int(seconds * 60)
     for _ in range(n):
         ov.tick()
         st = ov._spark
-        live = st["life"] > 0
-        counts.append(int(live.sum()))
-        if live.any():
-            f = st["life"][live] / np.maximum(0.01, st["full"][live])
-            alphas.append(float(np.mean(f ** 2)))
+        life = st["life"].copy()
+        if prev_vis is not None and len(prev_life) == len(life):
+            gone = (prev_life > 0) & ((life <= 0) | (life > prev_life + 1e-6))
+            pops += int((gone & (prev_vis > 0.10)).sum())
+        idx = np.arange(len(life))
+        vis = np.zeros(len(life))
+        alive = life > 0
+        if alive.any():
+            vis[alive] = ov._spark_vis(st, idx[alive])[0]
+        prev_vis, prev_life = vis, life
+        counts.append(int(alive.sum()))
         time.sleep(1.0 / 60.0)
     ov.close()
-
-    c = np.array(counts, dtype=float)
-    # относительный обрыв: (было - стало) / было
-    drops = []
-    for a, b in zip(c[:-1], c[1:]):
-        if a >= 20:
-            drops.append(max(0.0, (a - b) / a))
-    worst = float(max(drops)) if drops else 0.0
-    print("  %-26s частиц %4d..%4d | худший обрыв за кадр %5.1f%% | %s"
-          % (label, int(c.min()), int(c.max()), worst * 100,
-             "плавно" if worst < 0.12 else "РЫВОК"))
-    return worst < 0.12
+    c = np.array(counts)
+    print("  %-26s частиц %4d..%4d | пропало видимых %4d | %s"
+          % (label, int(c.min()), int(c.max()), pops,
+             "плавно" if pops == 0 else "РЫВОК"))
+    return pops == 0
 
 
 def main():
@@ -87,8 +89,8 @@ def main():
               label="speed .07 boost 6 den 4")
     ok &= run({"spark_speed": 1.6, "spark_boost": 2.5, "spark_density": 2.0},
               label="speed 1.6 boost 2.5 den 2")
-    ok &= run({"spark_speed": 3.0, "spark_boost": 4.0, "spark_density": 1.0},
-              label="speed 3.0 boost 4 den 1")
+    ok &= run({"spark_speed": 2.0, "spark_boost": 4.0, "spark_density": 8.0,
+               "spark_burst_count": 8.0}, label="speed 2 boost 4 den 8 burst 8")
     print()
     print("RESULT:", "no jumps" if ok else "there are jumps")
     return 0 if ok else 1
