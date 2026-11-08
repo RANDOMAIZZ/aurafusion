@@ -63,6 +63,10 @@ def run(style_over, seconds=12.0, label=""):
         life = st["life"].copy()
         if prev_vis is not None and len(prev_life) == len(life):
             gone = (prev_life > 0) & ((life <= 0) | (life > prev_life + 1e-6))
+            # ракета салюта гаснет на вершине нарочно: на её месте в том же
+            # кадре вспышка и осколки, это не рывок
+            if "kind" in st:
+                gone &= prev_kind != 2
             pops += int((gone & (prev_vis > 0.10)).sum())
         idx = np.arange(len(life))
         vis = np.zeros(len(life))
@@ -70,6 +74,7 @@ def run(style_over, seconds=12.0, label=""):
         if alive.any():
             vis[alive] = ov._spark_vis(st, idx[alive])[0]
         prev_vis, prev_life = vis, life
+        prev_kind = st["kind"].copy() if "kind" in st else None
         counts.append(int(alive.sum()))
         time.sleep(1.0 / 60.0)
     ov.close()

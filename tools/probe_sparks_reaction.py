@@ -230,6 +230,15 @@ def run(cfg_over=None, shots=None):
             if prev_life is None or len(prev_life) != len(life):
                 prev_life = np.zeros_like(life)
             born = np.flatnonzero((life > prev_life + 1e-6) & (life > 0))
+            # осколки и вспышка салюта рождаются через ~0.3 с после удара на
+            # вершине ракеты — это следствие удара, а не реакция на звук;
+            # в замер реакции их не берём
+            kinds = st.get("kind")
+            if kinds is not None:
+                for i in born[kinds[born] >= 3].tolist():
+                    if i in maxh:              # слот занял осколок — старая
+                        rec_h.append(maxh.pop(i))   # искра на этом кончилась
+                born = born[kinds[born] < 3]
             for i in born.tolist():
                 if i in maxh:
                     rec_h.append(maxh.pop(i))
@@ -249,6 +258,8 @@ def run(cfg_over=None, shots=None):
             hgt = yb - ys
             # «висит»: живая, уже выше 10% экрана и почти не движется
             stall = alive & (np.abs(vy) < 0.02 * H) & (hgt > 0.10 * H)
+            if kinds is not None:
+                stall &= kinds < 3
             stall_n.append(int(stall.sum()))
         rec_h.extend(maxh.values())
         ov.close()

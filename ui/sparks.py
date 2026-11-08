@@ -18,11 +18,15 @@
     удар   — атака полосы. Пучок вылетает в тот же кадр, где пришёл удар,
              ровно из его частот: бочка слева, хэт справа. Число частиц и
              высота — от силы удара.
-    бас    — сильная атака в нижней шестой части спектра: узкий плотный
-             столб из одной точки.
+    салют  — сильная атака в нижней шестой части спектра (бас): из точки
+             удара взлетает ракета и на вершине рассыпается кольцом искр,
+             которые тормозят о воздух, провисают и мерцают, догорая.
 
-Полёт считается по формуле от момента вылета, а не накоплением скорости по
-кадрам: положение не зависит от fps и от того, как часто Qt перерисовывает
+Чтобы искры не летели по линейке, у каждой свой небольшой разлёт вбок и
+своё покачивание (ползунок «Хаос разлёта»).
+
+Полёт считается по формуле от момента вылета (для осколков салюта — с
+сопротивлением воздуха и тяжестью), а не накоплением скорости по кадрам: положение не зависит от fps и от того, как часто Qt перерисовывает
 окно. После вершины искра не зависает, а медленно всплывает и гаснет —
 поэтому не собирается в горизонтальные «слои» на одной высоте.
 """
@@ -41,13 +45,24 @@ G_HIT = 3600.0        # удар выстреливает резко и быст
 FADE_IN = 0.035       # с, искра разгорается (без мелькания точками)
 JITTER = 0.22         # разброс высоты, σ логнормального множителя
 BG_SHARE = 0.55       # фон занимает не больше этой доли буфера
-BASS_THR = 0.8        # сила атаки баса, с которой летит отдельный столб
-BASS_GAP = 0.12       # с, не чаще одного столба
+BASS_THR = 0.55       # сила удара баса (атака × громкость), с которой летит салют
+BASS_GAP = 0.35       # с, не чаще одного салюта: иначе на каждой доле
+                      # припева небо было бы сплошной кашей из взрывов
+FW_DRAG = 2.4         # 1/с, торможение осколков салюта о воздух
+FW_G = 0.22           # провисание осколков, доля высоты экрана за с²
+SWAY_RAMP = 0.25      # с, покачивание нарастает после вылета, а не с места
+FW_RISE = 0.35        # с, подъём ракеты: взрыв почти сразу за ударом
+FW_RESERVE = 320      # слотов сверх бюджета — под осколки двух-трёх салютов сразу
 
-KIND_BG, KIND_HIT, KIND_BASS = 0, 1, 2
+# Виды частиц. Ракета салюта летит как удар, на вершине исчезает и
+# рождает осколки и вспышку.
+KIND_BG, KIND_HIT, KIND_SHELL, KIND_FW, KIND_FLASH = 0, 1, 2, 3, 4
 
 _FIELDS_F = ("x", "y", "vx", "vy", "life", "full", "x0", "y0", "v0", "g",
-             "tup", "drift", "born", "amp", "heat", "cr", "cg", "cb")
+             "tup", "drift", "born", "amp", "heat", "cr", "cg", "cb",
+             # сопротивление воздуха (осколки), покачивание: размах, частота,
+             # фаза; скорость сейчас (для следа); осколков и сила у ракеты
+             "k", "sw", "om", "ph", "vxn", "vyn", "fwn", "fws")
 
 
 def _new_state(cap, n_bands):
@@ -85,6 +100,8 @@ class SparksMixin:
             "sens": f("spark_sensitivity", 1.0, 0.25, 4.0),
             "bass": f("spark_bass_burst", 0.5, 0.0, 1.0),
             "hover": f("spark_hover", 1.0, 0.0, 2.0),
+            "chaos": f("spark_chaos", 0.5, 0.0, 2.0),
+            "fw_size": f("spark_fw_size", 1.0, 0.3, 2.0),
         }
 
     # ------------------------------------------------------------ шаг
@@ -103,11 +120,15 @@ class SparksMixin:
         if raw is None or not len(raw):
             raw = np.asarray(getattr(self, "_beat_in", self.lines), dtype=np.float32)
         nb = len(raw)
-        # Бюджет частиц: line_count × 4, от 32 до 2048.
-        cap = int(np.clip(S.get("line_count", 64) * 4, 32, 2048))
+        # Бюджет частиц: line_count × 4, от 32 до 2048. Плюс запас под
+        # салют: его осколки появляются разом, и без запаса им не хватало
+        # места рядом с фоном и ударами — кольцо выходило дырявым.
+        base_cap = int(np.clip(S.get("line_count", 64) * 4, 32, 2048))
+        cap = min(2048, base_cap + (FW_RESERVE if c["bass"] > 0.01 else 0))
         st = getattr(self, "_spark", None)
         if st is None or st["cap"] != cap or st["det"].n != nb:
             st = self._spark = _new_state(cap, nb)
+        st["base_cap"] = base_cap
 
         now = time.time()
         if st["t"] is None:
@@ -164,27 +185,33 @@ class SparksMixin:
             st["acc_hit"] -= k_hit
             if k_hit.any():
                 reqs.append((np.repeat(np.arange(nb), k_hit), KIND_HIT))
-            # Бас: сильная атака в нижней шестой части — отдельный столб.
+            # Бас: сильная атака в нижней шестой части — салют.
             lo_n = max(2, nb // 6)
             lo = onset[:lo_n]
-            top3 = np.sort(lo)[-3:]
-            s_b = float(top3.mean()) if len(top3) else 0.0
+            # Сила удара: самая сильная атака баса, умноженная на то, насколько
+            # громок бас на фоне трека. Салют — событие громкого места: в тихом
+            # куплете та же бочка его не запускает, в припеве — запускает.
+            s_b = float(lo.max()) * float(min(1.2, np.max(energy[:lo_n]))) if lo_n else 0.0
             mono = time.monotonic()
             if (c["bass"] > 0.01 and s_b > BASS_THR
                     and mono - st["last_bass"] >= BASS_GAP):
                 st["last_bass"] = mono
                 st["punch_hits"] += 1
                 k_b = int(np.argmax(lo))
-                n_b = int(c["bass"] * (10.0 + 30.0 * min(1.0, s_b / 2.0)) * min(2.0, dens))
+                # осколков: 100..240 при «Салют на басу» = 1 (по умолчанию 0.5 —
+                # вдвое меньше), плотность добавляет
+                n_b = int(c["bass"] * (100.0 + 140.0 * min(1.0, s_b)) * min(2.0, dens))
+                n_b = min(n_b, 260)
                 st["punch_req"] += n_b
                 if n_b > 0:
-                    reqs.append((np.full(n_b, k_b, np.int32), KIND_BASS))
+                    reqs.append((np.array([k_b], np.int32), KIND_SHELL))
                     st["bass_s"] = s_b
+                    st["bass_n"] = n_b
 
         if reqs:
             self._spark_emit(st, reqs, c, energy, onset, x0, y_base, w, H, px, now)
 
-        self._spark_move(st, c, dt, has_sig, now, px, H)
+        self._spark_move(st, c, dt, has_sig, now, px, H, W)
 
         self._stat["punch_hits"] = st["punch_hits"]
         self._stat["punch_req"] = st["punch_req"]
@@ -206,35 +233,41 @@ class SparksMixin:
             bands = np.asarray(bands, np.int32)
             m = len(bands)
             if kind == KIND_BG:
-                m = min(m, max(0, int(BG_SHARE * cap) - n_bg), len(free))
+                m = min(m, max(0, int(BG_SHARE * st.get("base_cap", cap)) - n_bg),
+                        len(free))
                 bands = rng.permutation(bands)[:m]
                 if m == 0:
                     continue
                 slots = np.array([free.pop() for _ in range(m)], np.int64)
                 n_bg += m
             else:
-                take = min(m, len(free))
-                slots = [free.pop() for _ in range(take)]
-                if take < m:
-                    # Места нет — уступают почти погасшие фоновые искры: удар
-                    # важнее догорающего фона. Видимую искру не трогаем —
-                    # её пропажа одним кадром заметна глазом.
-                    alive = np.flatnonzero((life > 0.0) & (st["kind"] == KIND_BG))
-                    if len(alive):
-                        vis = self._spark_vis(st, alive)[0]
-                        alive = alive[vis < 0.08]
-                        order = alive[np.argsort(vis[vis < 0.08])]
-                        slots += order[:m - take].tolist()
-                if kind == KIND_BASS:
-                    st["punch_ok"] += len(slots)
-                    st["punch_drop"] += m - len(slots)
+                slots = self._spark_take(st, m, free)
                 bands = bands[:len(slots)]
-                slots = np.asarray(slots, np.int64)
                 m = len(slots)
                 if m == 0:
                     continue
             self._spark_launch(st, slots, bands, kind, c, energy, onset,
                                x0, y_base, w, H, px, now)
+
+    def _spark_take(self, st, m, free):
+        """m слотов: сначала свободные, потом почти погасшие фоновые искры.
+
+        Удар и салют важнее догорающего фона. Видимую искру не трогаем —
+        её пропажа одним кадром заметна глазом. Может вернуть меньше m."""
+        life = st["life"]
+        take = min(m, len(free))
+        slots = [free.pop() for _ in range(take)]
+        if take < m:
+            alive = np.flatnonzero((life > 0.0) & (st["kind"] == KIND_BG))
+            if len(alive):
+                vis = self._spark_vis(st, alive)[0]
+                ok = vis < 0.03
+                order = alive[ok][np.argsort(vis[ok])]
+                slots += order[:m - take].tolist()
+                # занятые здесь слоты помечаем сразу, чтобы следующий запрос
+                # в этом же кадре не забрал их второй раз
+                st["kind"][order[:m - take]] = KIND_HIT
+        return np.asarray(slots, np.int64)
 
     def _spark_launch(self, st, idx, bands, kind, c, energy, onset,
                       x0, y_base, w, H, px, now):
@@ -249,6 +282,11 @@ class SparksMixin:
         h_fig = min(h_fig, top)
         jit = np.exp(rng.standard_normal(m) * JITTER)
         spd2 = max(c["spd"], 0.02) ** 2
+        chaos = c["chaos"]
+        if kind == KIND_SHELL:
+            self._spark_shell(st, idx, bands, c, energy, x0, y_base, w, H, px,
+                              now, h_fig, top, spd2)
+            return
         if kind == KIND_BG:
             # Фон: высота от уровня полосы, до половины фигуры.
             h = 0.5 * h_fig * (0.08 + 0.92 * np.power(e, 1.2))
@@ -256,21 +294,16 @@ class SparksMixin:
             amp = 0.30 + 0.45 * np.minimum(e, 1.2)
             heat = np.zeros(m)
             xs = (bands + rng.rand(m)) / nb
-            vx = rng.standard_normal(m) * 12.0 * px
+            vx = rng.standard_normal(m) * 12.0 * px * (1.0 + 2.0 * chaos)
         else:
             # Удар: высота от силы атаки. «Высота всплеска» поднимает потолок
             # удара над фоном, «разгон» — насколько сильный удар выстреливает
             # резче слабого.
             h_hit = min(top, h_fig * (0.5 + c["burst_h"]))
-            if kind == KIND_BASS:
-                s = float(st.get("bass_s", 1.0))
-                strength = np.full(m, min(1.0, s / 1.6))
-                xs = (bands + 0.5 + rng.standard_normal(m) * 0.35) / nb
-                vx = rng.standard_normal(m) * 25.0 * px
-            else:
-                strength = np.minimum(1.0, o / 1.2)
-                xs = (bands + rng.rand(m)) / nb
-                vx = rng.standard_normal(m) * 45.0 * px
+            strength = np.minimum(1.0, o / 1.2)
+            xs = (bands + rng.rand(m)) / nb
+            # веер удара: с хаосом шире, искры удара брызжут в стороны
+            vx = rng.standard_normal(m) * 45.0 * px * (1.0 + 2.0 * chaos)
             # высота — от силы удара и от громкости самой полосы: удар в
             # тихом куплете ниже, чем такой же удар в громком припеве
             h = h_hit * (0.22 + 0.78 * np.power(strength, 0.8)) \
@@ -304,20 +337,137 @@ class SparksMixin:
         st["drift"][idx] = (30.0 + 40.0 * rng.rand(m)) * px
         st["full"][idx] = tup + tail
         st["life"][idx] = tup + tail
+        # Покачивание: у каждой искры свой размах, частота и фаза — фонтан
+        # колышется, как искры над костром, а не летит по линейке.
+        st["sw"][idx] = chaos * (8.0 + 22.0 * rng.rand(m)) * px
+        st["om"][idx] = 2.0 * np.pi * (0.5 + 1.3 * rng.rand(m))
+        st["ph"][idx] = rng.rand(m) * 2.0 * np.pi
+        self._spark_common(st, idx, bands, kind, amp, heat, now)
+        st["vy"][idx] = -v0
+
+    def _spark_common(self, st, idx, bands, kind, amp, heat, now, rgb=None):
         st["born"][idx] = now
         st["kind"][idx] = kind
         st["bin"][idx] = bands
         st["amp"][idx] = amp
         st["heat"][idx] = heat
-        for i, k in zip(idx.tolist(), bands.tolist()):
-            r_, g_, b_ = self._shape_rgb(int(k))
-            st["cr"][i], st["cg"][i], st["cb"][i] = r_, g_, b_
+        if rgb is not None:
+            st["cr"][idx], st["cg"][idx], st["cb"][idx] = rgb
+        else:
+            for i, k in zip(idx.tolist(), np.broadcast_to(bands, idx.shape).tolist()):
+                r_, g_, b_ = self._shape_rgb(int(k))
+                st["cr"][i], st["cg"][i], st["cb"][i] = r_, g_, b_
         st["x"][idx] = st["x0"][idx]
         st["y"][idx] = st["y0"][idx]
+        st["vxn"][idx] = st["vx"][idx]
+
+    # ------------------------------------------------------------ салют
+    def _fw_radius(self, c, s, H):
+        """Радиус взрыва салюта: от силы удара и ползунка «Размер салюта»."""
+        return (0.09 + 0.09 * s) * H * c["fw_size"]
+
+    def _spark_shell(self, st, idx, bands, c, energy, x0, y_base, w, H, px,
+                     now, h_fig, top, spd2):
+        """Ракета салюта: взлетает от точки удара баса, наискосок к месту
+        взрыва. Бас всегда слева в спектре, и салют, взрывающийся прямо над
+        ним, наполовину уходил бы за край экрана. Поэтому ракета стартует
+        оттуда, где ударило, а взрывается правее — там, где кольцо целиком
+        помещается на экране."""
+        rng = np.random
+        nb = len(energy)
+        s = float(np.clip(st.get("bass_s", 1.0), 0.0, 1.0))
+        R = self._fw_radius(c, s, H)
+        xs = (bands.astype(np.float64) + 0.5) / nb
+        tx = xs + 0.05 + 0.35 * rng.rand(len(idx))
+        lo_m = min(0.45, (R + 10.0) / max(1.0, w))
+        tx = np.clip(tx, lo_m, 1.0 - lo_m)
+        h = h_fig * (0.5 + 0.35 * s) * np.exp(rng.standard_normal(len(idx)) * 0.12)
+        # кольцо целиком под верхним краем
+        h = np.clip(h, 0.25 * h_fig, max(0.25 * h_fig, y_base - R - 0.04 * H))
+        # Подъём за FW_RISE секунд, как у настоящей ракеты: резкий «вжух».
+        # Ползунок скорости меняет его мягко, иначе на медленной скорости
+        # взрыв отставал бы от удара на секунды.
+        t_rise = FW_RISE / max(c["spd"], 0.25) ** 0.5
+        g = 2.0 * h / (t_rise * t_rise)
+        v0 = np.sqrt(2.0 * g * h)
+        tup = v0 / g
+        tau = 0.5
+        sx = x0 + w * xs
+        st["x0"][idx] = sx
+        st["y0"][idx] = y_base - 1.0
+        st["vx"][idx] = (x0 + w * tx - sx) / (tau * (1.0 - np.exp(-tup / tau)))
+        st["v0"][idx] = v0
+        st["g"][idx] = g
+        st["tup"][idx] = tup
+        st["drift"][idx] = 0.0
+        # жизнь с запасом: ракета не догорает сама, её гасит взрыв на вершине,
+        # даже если кадр подвис и проскочил момент вершины
+        st["full"][idx] = tup + 1.0
+        st["life"][idx] = tup + 1.0
+        st["sw"][idx] = 0.0
+        st["fwn"][idx] = float(st.get("bass_n", 60))
+        st["fws"][idx] = s
+        self._spark_common(st, idx, bands, KIND_SHELL, 0.9, 1.0, now)
         st["vy"][idx] = -v0
 
+    def _spark_explode(self, st, c, shells, now, px, H):
+        """Ракеты на вершине: гаснут, на их месте — вспышка и кольцо осколков."""
+        free = list(np.flatnonzero(st["life"] <= 0.0)[::-1])
+        rng = np.random
+        for sh in shells.tolist():
+            ex, ey = float(st["x"][sh]), float(st["y"][sh])
+            s = float(st["fws"][sh])
+            n = int(st["fwn"][sh])
+            rgb = (float(st["cr"][sh]), float(st["cg"][sh]), float(st["cb"][sh]))
+            band = int(st["bin"][sh])
+            st["life"][sh] = 0.0
+            st["y"][sh] = 1e9
+            flash = self._spark_take(st, 1, free)
+            if len(flash):
+                st["x0"][flash] = ex
+                st["y0"][flash] = ey
+                st["vx"][flash] = 0.0
+                st["v0"][flash] = 0.0
+                st["k"][flash] = 1.0
+                st["g"][flash] = 0.0
+                st["full"][flash] = 0.22
+                st["life"][flash] = 0.22
+                st["tup"][flash] = 0.02
+                self._spark_common(st, flash, band, KIND_FLASH, 3.0 + 2.0 * s, 1.0, now, rgb)
+            idx = self._spark_take(st, n, free)
+            st["punch_ok"] += len(idx)
+            st["punch_drop"] += n - len(idx)
+            m = len(idx)
+            if m == 0:
+                continue
+            R = self._fw_radius(c, s, H)
+            # Пион: три четверти осколков летят почти на полный радиус и
+            # рисуют кольцо, четверть — внутрь, чтобы шар был не пустой.
+            ring = rng.rand(m) < 0.75
+            u = np.where(ring, 0.70 + 0.30 * rng.rand(m), 0.15 + 0.50 * rng.rand(m))
+            th = rng.rand(m) * 2.0 * np.pi
+            k = FW_DRAG * (0.85 + 0.30 * rng.rand(m))
+            spd = R * k * u            # на этой скорости осколок пролетит ~R*u
+            st["x0"][idx] = ex
+            st["y0"][idx] = ey
+            st["vx"][idx] = spd * np.cos(th)
+            st["v0"][idx] = spd * np.sin(th)        # вниз — плюс
+            st["k"][idx] = k
+            st["g"][idx] = FW_G * H * (0.8 + 0.4 * rng.rand(m))
+            full = (0.9 + 0.7 * rng.rand(m)) * (0.8 + 0.3 * c["hover"])
+            st["full"][idx] = full
+            st["life"][idx] = full
+            st["tup"][idx] = 0.3 * full             # горит ровно, потом гаснет
+            st["om"][idx] = 2.0 * np.pi * (7.0 + 6.0 * rng.rand(m))   # мерцание
+            st["ph"][idx] = rng.rand(m) * 2.0 * np.pi
+            # оттенок чуть гуляет от осколка к осколку: живее, чем ровная заливка
+            var = (0.85 + 0.3 * rng.rand(m))[:, None] * np.asarray(rgb, np.float32)[None, :]
+            var = np.clip(var, 0.0, 255.0)
+            self._spark_common(st, idx, band, KIND_FW, 0.55 + 0.40 * rng.rand(m), 1.0,
+                               now, (var[:, 0], var[:, 1], var[:, 2]))
+
     # ------------------------------------------------------------ полёт
-    def _spark_move(self, st, c, dt, has_sig, now, px, H):
+    def _spark_move(self, st, c, dt, has_sig, now, px, H, W):
         life = st["life"]
         alive = life > 0.0
         if not alive.any():
@@ -327,23 +477,66 @@ class SparksMixin:
         a = np.flatnonzero(life > 0.0)
         dead = alive & (life <= 0.0)
         if a.size:
-            age = (now - st["born"][a]).astype(np.float32)
-            tup = st["tup"][a]
-            v0 = st["v0"][a]
-            g = st["g"][a]
-            up = np.minimum(age, tup)
-            # точная баллистика до вершины: y = y0 - v0 t + g t²/2
-            y = st["y0"][a] - (v0 * up - 0.5 * g * up * up)
-            post = np.maximum(age - tup, 0.0)
-            y = y - st["drift"][a] * post
-            st["y"][a] = y
-            st["vy"][a] = np.where(age < tup, -(v0 - g * age), -st["drift"][a])
-            # горизонталь: начальный толчок гаснет за ~0.5 с
-            st["x"][a] = st["x0"][a] + st["vx"][a] * 0.5 * (1.0 - np.exp(-age / 0.5))
-            dead[a[y < -8.0]] = True
+            kind = st["kind"][a]
+            fw = kind >= KIND_FW
+            b = a[~fw]
+            if b.size:
+                self._move_rise(st, b, now)
+            f = a[fw]
+            if f.size:
+                self._move_fw(st, f, now)
+            y = st["y"][a]
+            dead[a[(y < -8.0) | (y > H + 10.0)]] = True
+            # ракеты на вершине взрываются — и в тишине тоже: запущенный
+            # салют должен догореть, а не повиснуть ракетой в небе
+            sh = a[(kind == KIND_SHELL) & ((now - st["born"][a]) >= st["tup"][a])]
+            sh = sh[~dead[sh]]
+            if sh.size:
+                self._spark_explode(st, c, sh, now, px, H)
         if dead.any():
             life[dead] = 0.0
             st["y"][dead] = 1e9
+
+    @staticmethod
+    def _move_rise(st, a, now):
+        """Фон, удар, ракета: баллистика вверх, потом всплывание."""
+        age = (now - st["born"][a]).astype(np.float32)
+        tup = st["tup"][a]
+        v0 = st["v0"][a]
+        g = st["g"][a]
+        up = np.minimum(age, tup)
+        # точная баллистика до вершины: y = y0 - v0 t + g t²/2
+        y = st["y0"][a] - (v0 * up - 0.5 * g * up * up)
+        post = np.maximum(age - tup, 0.0)
+        y = y - st["drift"][a] * post
+        st["y"][a] = y
+        st["vy"][a] = np.where(age < tup, -(v0 - g * age), -st["drift"][a])
+        # горизонталь: начальный толчок гаснет за ~0.5 с, поверх — своё
+        # покачивание, которое нарастает после вылета
+        ex = np.exp(-age / 0.5)
+        ramp = np.minimum(1.0, age / SWAY_RAMP)
+        om, ph, sw = st["om"][a], st["ph"][a], st["sw"][a]
+        st["x"][a] = (st["x0"][a] + st["vx"][a] * 0.5 * (1.0 - ex)
+                      + sw * np.sin(om * age + ph) * ramp)
+        st["vxn"][a] = st["vx"][a] * ex + sw * om * np.cos(om * age + ph) * ramp
+        st["vyn"][a] = st["vy"][a]
+
+    @staticmethod
+    def _move_fw(st, a, now):
+        """Осколки и вспышка салюта: разлёт с сопротивлением воздуха и тяжестью.
+
+        v(t) = v0·e^(-kt) + g/k·(1 - e^(-kt)) — скорость падает к скорости
+        «парашюта» g/k; положение — интеграл этого, тоже точный."""
+        age = (now - st["born"][a]).astype(np.float32)
+        k = np.maximum(st["k"][a], 1e-3)
+        e = np.exp(-k * age)
+        q = (1.0 - e) / k
+        g = st["g"][a]
+        st["x"][a] = st["x0"][a] + st["vx"][a] * q
+        st["y"][a] = st["y0"][a] + st["v0"][a] * q + g / k * (age - q)
+        st["vxn"][a] = st["vx"][a] * e
+        st["vyn"][a] = st["v0"][a] * e + g / k * (1.0 - e)
+        st["vy"][a] = st["vyn"][a]
 
     # ------------------------------------------------------------ спрайты
     def _spark_sprite(self, kind, r, g, b):
@@ -424,6 +617,11 @@ class SparksMixin:
         prog = np.clip(age / tup, 0.0, 1.0)          # 0 у базы, 1 на вершине
         ef = np.clip((st["y"][a] + 8.0) / 60.0, 0.0, 1.0)   # у верхнего края гаснет
         vis = (0.45 + 0.55 * np.minimum(st["amp"][a], 1.0)) * fin * fo * ef
+        fw = st["kind"][a] == KIND_FW
+        if fw.any():
+            # догорая, осколок салюта мерцает — тем сильнее, чем ближе конец
+            cr = 0.5 + 0.5 * np.sin(st["om"][a][fw] * age[fw] + st["ph"][a][fw])
+            vis[fw] *= 1.0 - 0.7 * (1.0 - fo[fw]) * cr
         return vis, fin, fo, age, prog
 
     def _spark_paint(self, p, S, st, a, y_base, alpha):
@@ -477,11 +675,18 @@ class SparksMixin:
         src = QRectF(0.0, 0.0, 64.0, 64.0)
         draw, set_op, R = p.drawPixmap, p.setOpacity, QRectF
 
-        # ореол — только в своём окне высоты полёта, края окна мягкие
+        kind = st["kind"][a]
+        # ореол — только в своём окне высоты полёта, края окна мягкие;
+        # у салюта горит всегда, он и есть свет
         if glow > 0.02:
             e_ = max(edge, 1e-6)
             gw = np.clip((prog - (g_a - e_)) / e_, 0.0, 1.0) * \
                 np.clip(((g_b + e_) - prog) / e_, 0.0, 1.0)
+            # салют светится сам: ракета и вспышка — всегда, осколок — пока
+            # горячий, ореол гаснет по мере того, как он остывает (и не
+            # стоит лишнего: осколков сотня на каждый взрыв)
+            gw = np.where(kind == KIND_FW, 1.0 - prog,
+                          np.where(kind >= KIND_SHELL, 1.0, gw))
             op_h = a_core * gw * min(1.0, 0.35 + 0.35 * glow)
             hsel = np.flatnonzero(op_h >= 0.02)
             if hsel.size:
@@ -510,26 +715,39 @@ class SparksMixin:
             rc = rc_l[i]
             set_op(ac)
             draw(R(xs_l[i] - rc, ys_l[i] - rc, rc * 2.0, rc * 2.0), core_spr[inv_l[i]], src)
-        # след — только у тех, кто сейчас быстро летит вверх
-        if trail > 0.01:
-            vy = st["vy"][a]
-            fast = np.flatnonzero((vy < -350.0 * max(0.15, float(np.clip(
-                S.get("spark_speed", 1.0), 0.01, 2.0)))) & (a_core > 0.05))
-            if fast.size:
-                vy_l = vy[fast].tolist()
-                for j, i in enumerate(fast.tolist()):
-                    # копии чаще радиуса — сливаются в сплошной хвост,
-                    # а не в пунктир из отдельных точек
-                    rc, ac, spr = rc_l[i], ac_l[i], core_spr[inv_l[i]]
-                    length = -vy_l[j] * (0.012 + 0.020 * trail)
-                    cnt = int(min(5, max(2, length / max(0.8 * rc, 1.0))))
-                    step = length / cnt
-                    for k in range(1, cnt + 1):
-                        q_ = k / (cnt + 1.0)
-                        rg = rc * (1.0 - 0.55 * q_)
-                        set_op(ac * trail * 0.55 * (1.0 - q_))
-                        yy = ys_l[i] + step * k
-                        draw(R(xs_l[i] - rg, yy - rg, rg * 2.0, rg * 2.0), spr, src)
+        # След — у тех, кто сейчас быстро летит: ударные искры вверх,
+        # ракета (огненный хвост) и осколки салюта (штрихи во все стороны).
+        # Копии чаще радиуса сливаются в сплошной хвост, а не в пунктир.
+        spd_t = float(np.clip(S.get("spark_speed", 1.0), 0.01, 2.0))
+        vxn, vyn = st["vxn"][a], st["vy"][a]
+        vxn = np.where(kind >= KIND_SHELL, vxn, 0.0)   # фон и удар — след вертикальный
+        sp = np.hypot(vxn, vyn)
+        is_fw = kind >= KIND_SHELL
+        tr = np.where(is_fw, max(trail, 0.5), trail)
+        fast = np.flatnonzero(np.where(is_fw, sp > np.where(kind == KIND_FW, 90.0, 40.0),
+                                       vyn < -350.0 * max(0.15, spd_t))
+                              & (a_core > 0.05) & (tr > 0.01) & (kind != KIND_FLASH))
+        if fast.size:
+            k_len = np.where(kind[fast] == KIND_SHELL, 0.06,
+                             np.where(kind[fast] == KIND_FW, 0.035, 0.012)) \
+                + 0.02 * tr[fast]
+            length = sp[fast] * k_len
+            ux = (-vxn[fast] / np.maximum(sp[fast], 1e-3)).tolist()
+            uy = (-vyn[fast] / np.maximum(sp[fast], 1e-3)).tolist()
+            len_l = length.tolist()
+            tr_l = tr[fast].tolist()
+            cap_l = np.where(kind[fast] == KIND_FW, 3, 6).tolist()
+            for j, i in enumerate(fast.tolist()):
+                rc, ac, spr = rc_l[i], ac_l[i], core_spr[inv_l[i]]
+                cnt = int(min(cap_l[j], max(2, len_l[j] / max(0.8 * rc, 1.0))))
+                step = len_l[j] / cnt
+                for k in range(1, cnt + 1):
+                    q_ = k / (cnt + 1.0)
+                    rg = rc * (1.0 - 0.55 * q_)
+                    set_op(ac * tr_l[j] * 0.55 * (1.0 - q_))
+                    xx = xs_l[i] + ux[j] * step * k
+                    yy = ys_l[i] + uy[j] * step * k
+                    draw(R(xx - rg, yy - rg, rg * 2.0, rg * 2.0), spr, src)
         p.setCompositionMode(mode0)
         p.setOpacity(base_op)
         p.setRenderHint(QPainter.SmoothPixmapTransform, had_sm)
