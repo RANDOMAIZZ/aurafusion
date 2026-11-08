@@ -216,6 +216,10 @@ def run(cfg_over=None, shots=None):
         rec_h = []           # (кадр рождения, высота вершины)
         live_n, stall_n = [], []
         prev_life = None
+        # плавность: яркость и вертикальное ускорение каждой искры прошлых кадров
+        prev_vis = prev_vy = prev_acc = None
+        prev_life_s = None
+        fade_drops, jerks = [], []
         for f in range(frames):
             aud.advance()
             # Тик зовёт time.time()/monotonic несколько раз; держим время
@@ -230,15 +234,6 @@ def run(cfg_over=None, shots=None):
             if prev_life is None or len(prev_life) != len(life):
                 prev_life = np.zeros_like(life)
             born = np.flatnonzero((life > prev_life + 1e-6) & (life > 0))
-            # осколки и вспышка салюта рождаются через ~0.3 с после удара на
-            # вершине ракеты — это следствие удара, а не реакция на звук;
-            # в замер реакции их не берём
-            kinds = st.get("kind")
-            if kinds is not None:
-                for i in born[kinds[born] >= 3].tolist():
-                    if i in maxh:              # слот занял осколок — старая
-                        rec_h.append(maxh.pop(i))   # искра на этом кончилась
-                born = born[kinds[born] < 3]
             for i in born.tolist():
                 if i in maxh:
                     rec_h.append(maxh.pop(i))
@@ -258,14 +253,38 @@ def run(cfg_over=None, shots=None):
             hgt = yb - ys
             # «висит»: живая, уже выше 10% экрана и почти не движется
             stall = alive & (np.abs(vy) < 0.02 * H) & (hgt > 0.10 * H)
-            if kinds is not None:
-                stall &= kinds < 3
             stall_n.append(int(stall.sum()))
+            # --- плавность, только для искр, живших и в прошлом кадре ---
+            vis = np.zeros(len(life))
+            ai = np.flatnonzero(alive)
+            if ai.size and hasattr(ov, "_spark_vis"):
+                vis[ai] = ov._spark_vis(st, ai)[0]
+            acc = None
+            if prev_vy is not None and len(prev_vy) == len(vy):
+                same = alive & (prev_life_s > 0) & ~np.isin(np.arange(len(life)), born)
+                acc = (vy - prev_vy) * FPS
+                # угасание: насколько яркость упала за кадр (смерть — до нуля)
+                gone = (prev_life_s > 0) & ((~alive) | np.isin(np.arange(len(life)), born))
+                d = np.where(same, prev_vis - vis, np.where(gone, prev_vis, 0.0))
+                fade_drops.append(float(d.max()) if d.size else 0.0)
+                if prev_acc is not None:
+                    # излом: скачок ускорения за кадр, в px/с² на 1080 строк
+                    j = np.abs(acc - prev_acc)[same & (prev_life_s > 0)]
+                    if j.size:
+                        jerks.append(float(np.percentile(j, 99)) * 1080.0 / H)
+            prev_vis, prev_vy, prev_acc = vis, vy.copy(), acc
+            prev_life_s = life.copy()
         rec_h.extend(maxh.values())
         ov.close()
     finally:
         overlay_mod.time, sparks_mod.time = saved
-    return analyse(events, births, rec_h, live_n, stall_n)
+    res = analyse(events, births, rec_h, live_n, stall_n)
+    if fade_drops:
+        res["самое резкое угасание за кадр, доля яркости"] = round(
+            float(np.percentile(fade_drops, 99)), 3)
+    if jerks:
+        res["излом подъёма: скачок ускорения, px/с² (p99)"] = int(np.median(jerks))
+    return res
 
 
 REG = {"lo": (0.0, 0.25), "mid": (0.25, 0.65), "hi": (0.65, 1.0)}
