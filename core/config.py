@@ -127,7 +127,10 @@ DEFAULTS = {
     # --- звук (общий движок pyaudiowpatch) ---
     "audio_device": "",
     "chunk": 2048,
-    "silence_thr": 0.002,
+    "silence_thr": 0.001,       # порог тишины (средний модуль сэмпла)
+    # Автоусиление тихого звука: во сколько раз можно поднять спектр и уровень
+    # на тихой музыке (1 — выкл).
+    "auto_gain_max": 8.0,
     "demo": False,
     # --- подсветка ПК ---
     "rgb_enabled": True,
@@ -211,6 +214,8 @@ FLOAT_KEYS = {
     "spark_glow_start": (0.0, 1.0),
     "spark_glow_end": (0.0, 1.0),
     "spark_sensitivity": (0.25, 4.0),
+    "auto_gain_max": (1.0, 16.0),
+    "silence_thr": (0.0001, 0.05),
     "spark_speed": (0.01, 2.0),
     "spark_height_tint": (0.0, 1.0),
     "spark_trail": (0.0, 1.0),

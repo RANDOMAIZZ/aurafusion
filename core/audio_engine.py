@@ -59,6 +59,11 @@ class SharedAudio(threading.Thread):
         # и по номеру отличает новый спектр от того же самого, прочитанного
         # второй раз: иначе один удар считался бы дважды или терялся.
         self.frame_seq = 0
+        # Автоусиление тихого звука: медленная огибающая пика спектра и
+        # время её последнего обновления.
+        self._agc_env = 0.0
+        self._agc_t = None
+        self.agc_gain = 1.0
         self.running = True
 
     # ---------- сетка бинов ----------
@@ -191,6 +196,11 @@ class SharedAudio(threading.Thread):
                 self.has_signal = lvl_abs > thr * 0.5   # отпускаем позже
             else:
                 self.has_signal = lvl_abs > thr * 1.5   # берём позже
+            gain = self._agc_step(spec, cfg2, self.has_signal, float(x.size) / float(sr))
+            if gain != 1.0:
+                spec = np.clip(spec * gain, 0.0, 3.0).astype(np.float32)
+                lvl *= gain
+                bass *= gain
             if self.has_signal:
                 n = min(len(spec), len(self.spec))
                 self.spec[:n] = spec[:n]
@@ -202,6 +212,54 @@ class SharedAudio(threading.Thread):
             self.level = lvl
             self.bass = bass * boost
             self.frame_seq += 1
+
+    def _agc_step(self, spec, cfg, has_signal, dt):
+        """Автоусиление тихого звука. Возвращает множитель для спектра и уровня.
+
+        Спектр считается по абсолютной шкале, поэтому тихая музыка давала
+        спектр около 0.06 из 3 и почти не двигала ни оверлей, ни подсветку:
+        на втрое тише чувствительность падала втрое. Здесь следим за медленной
+        огибающей пика спектра (быстро вверх, медленно вниз, ~8 с) и тянем
+        её к целевому уровню, но не больше чем в `auto_gain_max` раз. Пока
+        тихо совсем (нет сигнала), огибающая стоит и не раздувает шум.
+        auto_gain_max = 1 — выключено."""
+        try:
+            gmax = float(cfg.get("auto_gain_max", 8.0))
+        except (TypeError, ValueError):
+            gmax = 8.0
+        if gmax <= 1.001:
+            self.agc_gain = 1.0
+            return 1.0
+        # время — по звуку (сколько сэмплов пришло), а не по часам: так
+        # поведение не зависит от нагрузки и одинаково в тестах
+        dt = max(0.0, min(0.5, float(dt)))
+        if not (has_signal and len(spec)):
+            # тишина: ни огибающую, ни множитель не трогаем — иначе множитель
+            # уползал бы к максимуму, а первый удар после паузы уходил в
+            # потолок спектра и терял резкость
+            return float(self.agc_gain)
+        smax = float(np.max(spec))
+        env = self._agc_env
+        first = env <= 0.0                         # первый звук после запуска
+        tau = 0.4 if smax > env else 8.0           # вверх быстро, вниз медленно
+        a = 1.0 - math.exp(-dt / tau) if dt > 0 else 1.0
+        self._agc_env = smax if first else env + (smax - env) * a
+        env = max(self._agc_env, 0.02)
+        target = 1.0
+        g = max(1.0, min(gmax, target / env))
+        # плавное изменение множителя, чтобы картинка не прыгала
+        # Множитель растёт медленно (~3 с), чтобы подъём не читался детектором
+        # ударов как нарастание звука, и падает быстрее (~0.4 с), чтобы громкий
+        # кусок не упирался в потолок спектра.
+        if first:
+            # начальный множитель ставим сразу: растить его три секунды значило
+            # бы первые секунды трека показывать его тихим
+            self.agc_gain = g
+            return float(g)
+        tau_g = 5.0 if g > self.agc_gain else 0.4
+        step = dt if dt > 0 else 1.0 / 60.0
+        self.agc_gain += (g - self.agc_gain) * (1.0 - math.exp(-step / tau_g))
+        return float(self.agc_gain)
 
     # ---------- устройства ----------
     @staticmethod
