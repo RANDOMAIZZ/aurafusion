@@ -444,6 +444,10 @@ class Overlay(SparksMixin, QWidget):
         self.setGeometry(work_geometry(screen, self._cfg().get("avoid_taskbar", True)))
 
         self.timer = QTimer(self)
+        # Точный таймер. Обычный (CoarseTimer) на Windows тикает по системному
+        # кванту ~15.6 мс: на 60 fps кадры шли то через 15, то через 31 мс, и
+        # любое движение — искры, волна — дёргалось, хотя считалось верно.
+        self.timer.setTimerType(Qt.PreciseTimer)
         self.timer.timeout.connect(self.tick)
         self.apply_fps()
         # (x, y, w, h) окна, которое не должно голосовать за цвет, в координатах
